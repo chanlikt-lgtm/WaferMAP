@@ -72,7 +72,8 @@ class ReportWorker(QThread):
         Error message on failure or cancellation.
     """
 
-    progress       = pyqtSignal(int)          # 0–100
+    progress       = pyqtSignal(int)          # 0–100  overall pipeline
+    wafer_progress = pyqtSignal(int)          # 0–100  wafer-render phase only
     status_message = pyqtSignal(str)
     wafer_ready    = pyqtSignal(str, str, str) # lot_id, wafer_id, png_path
     report_done    = pyqtSignal(str, str, str) # pdf, csv, pptx  (renamed to free QThread.finished)
@@ -132,6 +133,9 @@ class ReportWorker(QThread):
         Translate (current, total) into a 0–100 percentage and emit signals.
         Also checks the cancellation flag — raises RuntimeError to abort
         the pipeline cleanly if the user pressed Cancel.
+
+        total = num_wafers + 3  (PDF + CSV + PPTX steps).
+        The first (total - 3) steps are wafer renders; the last 3 are exports.
         """
         if self._cancel_evt.is_set():
             raise RuntimeError("Cancelled by user.")
@@ -139,6 +143,14 @@ class ReportWorker(QThread):
         pct = int(current / total * 100) if total > 0 else 0
         self.progress.emit(pct)
         self.status_message.emit(message)
+
+        # Wafer-bar: 0-100 based on wafer render phase only
+        wafer_total = max(total - 3, 1)  # total - 3 export steps
+        if message.startswith("Rendering"):
+            wpct = min(int(current / wafer_total * 100), 99)
+            self.wafer_progress.emit(wpct)
+        elif any(k in message for k in ("PDF", "CSV", "PowerPoint", "Done")):
+            self.wafer_progress.emit(100)
 
     def _on_wafer_ready(self, lot_id: str, wafer_id: str, png_path: str) -> None:
         """Forward the wafer-ready event to the UI thread via a Qt signal."""

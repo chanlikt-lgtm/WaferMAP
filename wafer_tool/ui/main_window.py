@@ -1046,6 +1046,7 @@ class DataProcessorUI(QMainWindow):
             self._worker = None
         self._worker = ReportWorker(fp, config, out)
         self._worker.progress.connect(self.overall_bar.setValue)
+        self._worker.wafer_progress.connect(self.wafer_bar.setValue)
         self._worker.status_message.connect(self._on_msg)
         self._worker.wafer_ready.connect(self._on_wafer)
         self._worker.report_done.connect(self._on_done)
@@ -1082,11 +1083,6 @@ class DataProcessorUI(QMainWindow):
         self._status(msg, _YELLOW); self._sb.setText(msg)
         if msg.startswith("Rendering"):
             self._wafer_count += 1
-            if self._total_wafers > 0:
-                self.wafer_bar.setValue(min(int(self._wafer_count/self._total_wafers*100), 99))
-        elif any(k in msg for k in ("PDF","CSV","PowerPoint","Done")):
-            self.wafer_bar.setValue(100)
-            self.wafer_bar.setFormat("100%  (wafer render ✓)")
 
     def _on_wafer(self, lot: str, wid: str, png: str) -> None:
         """Add to grid — resets grid on lot change; auto-cycles every 25 wafers."""
