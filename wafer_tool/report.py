@@ -40,6 +40,7 @@ import matplotlib.pyplot as plt
 
 from .config import PlotConfig
 from .data_loader import read_wafer_data
+from .logger import log, log_exception
 from .plotting import draw_wafer_ax
 from .statistics import calculate_8_condition_statistics
 from .exporters.pdf_exporter import generate_pdf
@@ -100,6 +101,7 @@ def generate_report(
     wafer_pairs = list(data.groupby(["lot", "wafer"]).groups.keys())
     # Wafer renders + PDF + CSV + PPTX
     total_steps = len(wafer_pairs) + 3
+    log.info("Pipeline: %d wafers to render, out_dir=%s", len(wafer_pairs), out_dir)
     del wafer_pairs  # only needed for the count
 
     # ── Pre-compute statistics ────────────────────────────────────────────
@@ -226,6 +228,11 @@ def _render_wafer_pngs(
                                       show_legend=False, show_title=False)
                 if valid:
                     fig.savefig(square_path, bbox_inches="tight", pad_inches=0)
+                else:
+                    log.warning("Skipped lot=%s wafer=%s — too few points (%d)",
+                                lot_id, wid, len(w_df))
+            except Exception as exc:
+                log_exception(exc, context=f"render lot={lot_id} wafer={wid}")
             finally:
                 if fig is not None:
                     plt.close(fig)

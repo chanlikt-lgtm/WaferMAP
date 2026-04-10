@@ -10,6 +10,7 @@ from pathlib import Path
 import pandas as pd
 
 from .exceptions import DataLoadError
+from .logger import log
 
 __all__ = ["read_wafer_data"]
 
@@ -25,6 +26,9 @@ def read_wafer_data(
     filepath = Path(filepath)
     if not filepath.exists():
         raise DataLoadError(f"File not found: {filepath}")
+
+    log.info("Loading: %s  (%.1f MB)", filepath.name,
+             filepath.stat().st_size / 1_048_576)
 
     raw = _try_read(filepath)
 
@@ -95,6 +99,8 @@ def read_wafer_data(
             "Check that the file format and column indices are correct."
         )
 
+    log.info("Loaded %d rows, %d wafers",
+             len(df), df.groupby(["lot", "wafer"]).ngroups)
     return df.reset_index(drop=True)
 
 

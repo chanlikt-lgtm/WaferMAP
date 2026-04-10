@@ -49,6 +49,7 @@ import threading
 from PyQt6.QtCore import QThread, pyqtSignal
 
 from wafer_tool.config import PlotConfig
+from wafer_tool.logger import log, log_exception
 from wafer_tool.report import generate_report
 
 
@@ -103,6 +104,7 @@ class ReportWorker(QThread):
     # ------------------------------------------------------------------
 
     def run(self) -> None:
+        log.info("Worker started  file=%s  out=%s", self._filepath, self._out_dir)
         try:
             pdf, csv, pptx = generate_report(
                 filepath=self._filepath,
@@ -112,10 +114,13 @@ class ReportWorker(QThread):
                 on_wafer_ready=self._on_wafer_ready,
             )
             if self._cancel_evt.is_set():
+                log.info("Worker: cancelled by user")
                 self.error.emit("Cancelled by user.")
             else:
+                log.info("Worker done  pdf=%s  csv=%s  pptx=%s", pdf, csv, pptx)
                 self.report_done.emit(pdf, csv or "", pptx)
         except Exception as exc:
+            log_exception(exc, context="ReportWorker.run")
             self.error.emit(str(exc))
 
     # ------------------------------------------------------------------

@@ -21,15 +21,30 @@ import sys
 import matplotlib
 matplotlib.use("Agg")   # Non-interactive backend; Qt widgets use their own renderer
 
+from wafer_tool.logger import log, session_start, log_exception
+
+# ── Install global uncaught-exception handler BEFORE importing Qt ─────────────
+def _excepthook(exc_type, exc_value, exc_tb):
+    log_exception(exc_value, context="uncaught exception")
+    sys.__excepthook__(exc_type, exc_value, exc_tb)
+
+sys.excepthook = _excepthook
+
 from PyQt6.QtWidgets import QApplication
 from wafer_tool.ui.main_window import DataProcessorUI
 
 
 def main() -> None:
-    app = QApplication(sys.argv)
-    window = DataProcessorUI()
-    window.show()
-    sys.exit(app.exec())
+    session_start()
+    try:
+        app = QApplication(sys.argv)
+        window = DataProcessorUI()
+        window.show()
+        log.info("UI ready")
+        sys.exit(app.exec())
+    except Exception as exc:
+        log_exception(exc, context="main()")
+        raise
 
 
 if __name__ == "__main__":
