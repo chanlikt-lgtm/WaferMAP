@@ -1,0 +1,14 @@
+# Core scientific stack
+numpy>=1.24
+pandas>=2.0
+scipy>=1.10
+matplotlib>=3.7
+
+# PDF manipulation
+pypdf>=3.0
+
+# GUI
+PyQt6>=6.5
+
+# PowerPoint (optional — PPTX output is skipped if not installed)
+python-pptx>=0.6.21
