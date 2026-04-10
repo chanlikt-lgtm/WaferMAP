@@ -100,13 +100,17 @@ pyz = PYZ(a.pure)
 exe = EXE(
     pyz,
     a.scripts,
+    a.binaries,             # embed all DLLs into the single file
+    a.datas,                # embed all data files into the single file
     [],
-    exclude_binaries=True,
+    exclude_binaries=False, # onefile: include everything in the exe
     name="WaferMapTool",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
+    upx_exclude=[],
+    runtime_tmpdir=None,    # extract to OS temp dir on launch
     console=False,          # no black console window — GUI app
     disable_windowed_traceback=False,
     argv_emulation=False,
@@ -114,14 +118,4 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     # icon="wafer_tool.ico",  # uncomment and supply a .ico to add a taskbar icon
-)
-
-coll = COLLECT(
-    exe,
-    a.binaries,
-    a.datas,
-    strip=False,
-    upx=True,
-    upx_exclude=[],
-    name="WaferMapTool",    # → dist\WaferMapTool\
 )
