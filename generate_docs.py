@@ -1089,6 +1089,135 @@ LOT001,3,0,1,1
           "To read it after a crash or error, open the file in any text editor or share it "
           "for remote diagnosis."),
     ]
+    story.append(pb())
+
+    # ══════════════════════════════════════════════════════════════════════
+    # 12. BUILDING THE EXECUTABLE
+    # ══════════════════════════════════════════════════════════════════════
+    story.append(h1("12. Building the Executable (.exe)"))
+    story += [
+        p("The tool ships two PyInstaller build configurations. "
+          "Both are Windows 64-bit and require no Python installation on the target machine. "
+          "PyInstaller bundles the Python interpreter, all dependencies "
+          "(PyQt6, Matplotlib, SciPy, NumPy, Pandas, ReportLab, python-pptx, pypdf), "
+          "and all Matplotlib/SciPy data files into the output."),
+    ]
+
+    story.append(h2("12.1  Prerequisites"))
+    story += [
+        bullet("Python 3.11+ with all project dependencies installed "
+               "(<code>py -m pip install -r requirements.txt</code>)."),
+        bullet("PyInstaller 6.x: <code>py -m pip install pyinstaller</code>"),
+        bullet("Run all build commands from the repository root "
+               "(<code>E:\\claude\\Wafer_tool_NEW2\\</code>)."),
+    ]
+
+    story.append(h2("12.2  Option A — Standalone Single-File EXE"))
+    story += [
+        p("Everything packed into one <b>114 MB</b> <code>.exe</code>. "
+          "Copy the single file to any Windows PC and double-click — no folder, no DLLs."),
+        p("<b>Spec file:</b> <code>WaferMapTool.spec</code>"),
+    ]
+    story.append(code("py -m PyInstaller WaferMapTool.spec --noconfirm"))
+    story += [
+        p("<b>Output:</b>"),
+    ]
+    story.append(code("dist\\WaferMapTool.exe          (114 MB — single file)"))
+    story += [
+        p("<b>Trade-off:</b> On first launch the bootloader extracts all files to the OS "
+          "temp directory (<code>%TEMP%\\_{MEI...}</code>). This adds ~3–8 seconds to the "
+          "very first startup. Subsequent launches from the same temp extraction are faster. "
+          "Antivirus software may flag single-file PyInstaller exes — add an exception if needed."),
+    ]
+
+    story.append(h2("12.3  Option B — Folder Distribution (small EXE + lib folder)"))
+    story += [
+        p("A <b>23 MB</b> launcher exe sits alongside a <code>_internal/</code> folder "
+          "containing all DLLs and data files (~262 MB total). "
+          "Faster startup than the single-file version (no extraction step)."),
+        p("<b>Spec file:</b> <code>WaferMapTool_folder.spec</code>"),
+    ]
+    story.append(code("py -m PyInstaller WaferMapTool_folder.spec --noconfirm"))
+    story += [
+        p("<b>Output:</b>"),
+    ]
+    story.append(code("""\
+dist\\WaferMapTool_folder\\
+    WaferMapTool.exe        (23 MB — launcher)
+    _internal\\              (239 MB — DLLs, data, Python runtime)
+        PyQt6\\
+        matplotlib\\
+        scipy\\
+        numpy\\
+        pandas\\
+        ... (all dependencies)"""))
+    story += [
+        p("<b>To distribute:</b> Zip the entire <code>WaferMapTool_folder\\</code> directory. "
+          "The small exe will <b>not</b> run if separated from its <code>_internal\\</code> folder."),
+    ]
+
+    story.append(h2("12.4  Comparison"))
+    story.append(table([
+        ["Property",          "Standalone EXE",         "Folder Distribution"],
+        ["File to share",     "1 file (114 MB)",        "1 folder (~262 MB zipped)"],
+        ["EXE size",          "114 MB",                 "23 MB"],
+        ["First launch",      "~5–10 s (extraction)",   "~2–3 s (direct load)"],
+        ["Subsequent launch", "~2–3 s",                 "~2–3 s"],
+        ["Antivirus risk",    "Moderate",               "Low"],
+        ["Easy to update",    "Rebuild whole exe",      "Replace individual files"],
+        ["Spec file",         "WaferMapTool.spec",      "WaferMapTool_folder.spec"],
+        ["Build command",     "PyInstaller WaferMapTool.spec", "PyInstaller WaferMapTool_folder.spec"],
+    ], col_widths=[4*cm, 5.5*cm, 7*cm]))
+
+    story.append(h2("12.5  What Is Bundled"))
+    story.append(table([
+        ["Package",         "Version",  "Purpose in App"],
+        ["Python",          "3.11",     "Runtime interpreter"],
+        ["PyQt6",           "latest",   "GUI framework (widgets, signals, QThread)"],
+        ["Matplotlib",      "latest",   "Wafer contour maps, PDF pages, histogram/scatter"],
+        ["NumPy",           "latest",   "Float32 array maths"],
+        ["SciPy",           "latest",   "griddata interpolation (Delaunay triangulation)"],
+        ["Pandas",          "latest",   "DataFrame for wafer data (CSV parsing)"],
+        ["pypdf",           "latest",   "PDF bookmark injection"],
+        ["python-pptx",     "latest",   "PowerPoint report generation (optional)"],
+        ["ReportLab",       "4.x",      "Documentation PDF generator"],
+        ["PyInstaller",     "6.x",      "Build tool (not included in output)"],
+    ], col_widths=[3*cm, 2.5*cm, 11*cm]))
+
+    story.append(h2("12.6  Rebuild After Code Changes"))
+    story += [
+        p("After modifying any <code>.py</code> file, rebuild with the same command. "
+          "PyInstaller detects changed files automatically:"),
+    ]
+    story.append(code("""\
+cd E:\\claude\\Wafer_tool_NEW2
+
+# Rebuild standalone (replaces dist\\WaferMapTool.exe)
+py -m PyInstaller WaferMapTool.spec --noconfirm
+
+# Rebuild folder version (replaces dist\\WaferMapTool_folder\\)
+py -m PyInstaller WaferMapTool_folder.spec --noconfirm"""))
+    story += [
+        p("The <code>build\\</code> cache is reused between rebuilds to speed up the process. "
+          "Delete <code>build\\</code> manually if you encounter stale-cache issues."),
+    ]
+
+    story.append(h2("12.7  Adding a Custom Icon"))
+    story += [
+        p("To set a custom taskbar/exe icon, supply a <code>.ico</code> file and uncomment "
+          "the icon line in both spec files:"),
+    ]
+    story.append(code("""\
+# In WaferMapTool.spec or WaferMapTool_folder.spec, inside EXE():
+icon="wafer_tool.ico",    # path relative to repo root"""))
+    story += [
+        p("Convert a PNG to ICO online (e.g., convertio.co) or with Pillow:"),
+    ]
+    story.append(code("""\
+from PIL import Image
+img = Image.open("wafer_tool.png")
+img.save("wafer_tool.ico", format="ICO",
+         sizes=[(16,16),(32,32),(48,48),(256,256)])"""))
 
     return story
 
