@@ -108,7 +108,7 @@ def _try_read(filepath: Path) -> pd.DataFrame:
 
     strategies = [
         ("CSV (comma)",    {"sep": ",",     "engine": "c"}),
-        ("whitespace/tab", {"sep": r"\s+",  "engine": "c"}),
+        ("whitespace/tab", {"sep": r"\s+",  "engine": "python"}),  # regex sep needs python engine
     ]
 
     last_exc: Exception | None = None
@@ -118,7 +118,6 @@ def _try_read(filepath: Path) -> pd.DataFrame:
             df = pd.read_csv(
                 filepath,
                 header=None,
-                engine="python",
                 dtype=str,        # prevent 'inf'/'nan'/etc. being cast to float
                 keep_default_na=False,  # keep empty cells as '' not NaN
                 **kwargs,
