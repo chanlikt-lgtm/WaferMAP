@@ -895,6 +895,13 @@ on_wafer_ready(lot_id: str, wafer_id: str, png_path: str) -> None
         p("Each figure is created, saved, and closed in a <code>try/finally</code> block. "
           "The square figure is closed and set to <code>None</code> <i>before</i> the wide "
           "(PPTX) figure is opened — so only one figure exists in memory at a time per wafer."),
+        p("<b>PPTX image size reduction:</b> The PPTX variant is rendered at "
+          "<code>figsize=(7, 5), dpi=80</code> (down from 8×6 at dpi=100). This reduces "
+          "each slide image by ~40%, significantly lowering peak RAM during <code>prs.save()</code> "
+          "and producing a smaller .pptx file — important when hundreds of wafers are processed."),
+        p("<code>gc.collect()</code> is called immediately before <code>prs.save()</code> "
+          "to release any remaining PNG byte buffers held by python-pptx before the final "
+          "write flush."),
     ]
 
     story.append(h2("7.4  Scatter / Preview Downsampling"))
@@ -1214,23 +1221,29 @@ Output:  dist\\WaferMapTool_folder\\
     story.append(table([
         ["File",                    "Size",   "Why safe to remove"],
         ["opengl32sw.dll",          "20.6 MB","Software OpenGL fallback — app uses Agg (CPU) renderer, no OpenGL"],
-        ["libscipy_openblas64_*.dll","20.4 MB","Scipy's OpenBLAS — sneaks in even with scipy Python excluded"],
         ["_avif.cp311-win_amd64.pyd", "7.9 MB","Pillow AVIF image plugin — app never loads/saves AVIF files"],
         ["libcrypto-3.dll",         "5.2 MB", "OpenSSL crypto — only needed by Qt6Network (excluded)"],
         ["Qt6Pdf.dll",              "4.6 MB", "Qt PDF engine — app uses Matplotlib for PDF, not Qt"],
         ["Qt6Network.dll",          "1.8 MB", "Qt networking — no network features in app"],
         ["libssl-3.dll",            "0.8 MB", "OpenSSL SSL — same reason as libcrypto"],
     ], col_widths=[5*cm, 2*cm, 9.5*cm]))
-    story += [sp(4), p("<b>Implementation</b> — add after <code>Analysis()</code> in the spec:")]
+    story += [
+        sp(4),
+        note("<b>Important:</b> <code>libscipy_openblas64_*.dll</code> must NOT be excluded. "
+             "Despite the 'scipy' prefix, numpy 2.x ships this same DLL as its OpenBLAS backend. "
+             "Excluding it causes numpy C-extension import failure at runtime."),
+        sp(4),
+        p("<b>Implementation</b> — add after <code>Analysis()</code> in the spec:"),
+    ]
     story.append(code("""\
 _BINARY_EXCLUDES = [
-    "opengl32sw",        # 20.6 MB  software OpenGL — not needed (Agg backend)
-    "libscipy_openblas", # 20.4 MB  scipy OpenBLAS DLL — scipy excluded
-    "_avif",             #  7.9 MB  Pillow AVIF plugin — never used
-    "libcrypto",         #  5.2 MB  OpenSSL — only needed by Qt6Network
-    "qt6pdf",            #  4.6 MB  Qt PDF — we use matplotlib for PDF
-    "qt6network",        #  1.8 MB  Qt networking — no network in app
-    "libssl",            #  0.8 MB  OpenSSL SSL — same as libcrypto
+    "opengl32sw",   # 20.6 MB  software OpenGL — not needed (Agg backend)
+    # NOTE: do NOT add "libscipy_openblas" — numpy 2.x uses this same DLL!
+    "_avif",        #  7.9 MB  Pillow AVIF plugin — never used
+    "libcrypto",    #  5.2 MB  OpenSSL — only needed by Qt6Network
+    "qt6pdf",       #  4.6 MB  Qt PDF — we use matplotlib for PDF
+    "qt6network",   #  1.8 MB  Qt networking — no network in app
+    "libssl",       #  0.8 MB  OpenSSL SSL — same as libcrypto
 ]
 a.binaries = [b for b in a.binaries
               if not any(x in b[0].lower() for x in _BINARY_EXCLUDES)]"""))
@@ -1242,8 +1255,8 @@ a.binaries = [b for b in a.binaries
         ["1. Baseline (all dependencies)",           "114 MB",        "—"],
         ["2. + Aggressive Python module exclusions", "92 MB",         "−22 MB"],
         ["3. + Replace scipy → matplotlib.tri",      "78 MB",         "−36 MB"],
-        ["4. + Binary filtering (7 DLLs/PYDs)",      "53 MB",         "−61 MB"],
-        ["Total reduction",                          "53 MB",         "−53% vs baseline"],
+        ["4. + Binary filtering (6 DLLs/PYDs)",      "59 MB",         "−40 MB"],
+        ["Total reduction",                          "59 MB",         "−48% vs baseline"],
     ], col_widths=[8*cm, 3.5*cm, 3*cm]))
     story += [
         sp(4),
@@ -1265,7 +1278,7 @@ a.binaries = [b for b in a.binaries
         ["PyQt6.QtPrintSupport / QtSvg / QtNetwork / QtOpenGL", "Qt modules not used by this app"],
         ["matplotlib backends: svg / wxagg / tkagg / gtk3agg / ps", "Only qtagg + pdf + agg used"],
         ["scipy.stats / signal / optimize / fft / linalg / io / ndimage", "Unused scipy submodules"],
-        ["pandas.io.formats.style / plotting / tests", "Unused pandas extras"],
+        ["pandas.io.formats.style / tests", "Unused pandas extras (pandas.plotting must NOT be excluded — pandas internally imports it)"],
         ["IPython / jupyter / pytest / sphinx / setuptools", "Dev tools, never shipped"],
         ["tkinter / wx / _tkinter",    "Other GUI toolkits not used"],
     ], col_widths=[7*cm, 9.5*cm]))
