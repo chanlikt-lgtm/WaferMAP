@@ -248,7 +248,7 @@ def _render_wafer_pngs(
             if pptx_png_dir and valid:
                 fig2 = None
                 try:
-                    fig2, ax2 = plt.subplots(figsize=(8, 6), dpi=100)
+                    fig2, ax2 = plt.subplots(figsize=(7, 5), dpi=80)
                     draw_wafer_ax(ax2, w_df, wid, config,
                                   show_legend=True, show_title=False)
                     fig2.savefig(

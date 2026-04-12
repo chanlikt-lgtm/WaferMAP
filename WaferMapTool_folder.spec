@@ -5,9 +5,12 @@ WaferMapTool_folder.spec  —  FOLDER build (small exe + lib folder)
 Build:   py -m PyInstaller WaferMapTool_folder.spec --noconfirm
 Output:  dist\WaferMapTool_folder\WaferMapTool.exe  (+ _internal\ next to it)
 """
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_all
 
 mpl_data = collect_data_files("matplotlib")
+
+# numpy: collect_all ensures C-extension DLLs are bundled.
+numpy_datas, numpy_binaries, numpy_hidden = collect_all("numpy")
 
 hidden = [
     "PyQt6.QtCore",
@@ -19,11 +22,7 @@ hidden = [
     "matplotlib.backends.backend_agg",
     "matplotlib.figure",
     "matplotlib.pyplot",
-    "scipy.interpolate",
-    "scipy.interpolate.interpnd",
-    "scipy.spatial",
-    "scipy.spatial._qhull",
-    "scipy.spatial._ckdtree",
+    "matplotlib.tri",          # replaces scipy.griddata
     "pandas",
     "pandas._libs.tslibs.np_datetime",
     "pandas._libs.tslibs.nattype",
@@ -37,21 +36,20 @@ hidden = [
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=[],
-    datas=mpl_data,
-    hiddenimports=hidden,
+    binaries=numpy_binaries,
+    datas=mpl_data + numpy_datas,
+    hiddenimports=hidden + numpy_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         "tkinter", "wx", "_tkinter",
+        "scipy", "scipy.interpolate", "scipy.spatial",
         "scipy.stats", "scipy.signal", "scipy.optimize",
         "scipy.fft", "scipy.linalg", "scipy.io",
         "scipy.ndimage", "scipy.odr", "scipy.sparse",
-        "scipy.cluster", "scipy.constants",
-        "scipy.interpolate._rbfinterp_pythran",
+        "scipy.cluster",
         "pandas.io.formats.style",
-        "pandas.plotting",
         "pandas.io.clipboard",
         "pandas.tests",
         "sqlalchemy", "psycopg2", "MySQLdb", "pymysql",

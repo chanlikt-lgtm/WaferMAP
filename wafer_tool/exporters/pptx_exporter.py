@@ -91,6 +91,7 @@ def create_powerpoint_report(
         _set_title(slide, os.path.splitext(filename)[0])
         slide.shapes.add_picture(img_path, Pt(100), Pt(100))
 
+    import gc; gc.collect()   # free any lingering PNG buffers before writing
     prs.save(pptx_path)
     print(f"✓ PowerPoint saved: {pptx_path}")
 

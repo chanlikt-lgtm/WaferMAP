@@ -5,11 +5,15 @@ WaferMapTool.spec  —  STANDALONE single-file build
 Build:   py -m PyInstaller WaferMapTool.spec --noconfirm
 Output:  dist\WaferMapTool.exe   (one file, no folder needed)
 """
-from PyInstaller.utils.hooks import collect_data_files
+from PyInstaller.utils.hooks import collect_data_files, collect_all
 
 # Only the matplotlib fonts/styles are essential at runtime.
 # Exclude scipy data (test fixtures etc.) — not needed.
 mpl_data = collect_data_files("matplotlib")
+
+# numpy: collect_all ensures C-extension DLLs (e.g. _multiarray_umath.pyd) are bundled.
+# Without this, PyInstaller misses them and numpy fails to import at runtime.
+numpy_datas, numpy_binaries, numpy_hidden = collect_all("numpy")
 
 hidden = [
     # PyQt6 — only what the app actually touches
@@ -25,12 +29,8 @@ hidden = [
     "matplotlib.figure",
     "matplotlib.pyplot",
 
-    # scipy — only griddata + Delaunay triangulation (geometry.py)
-    "scipy.interpolate",
-    "scipy.interpolate.interpnd",
-    "scipy.spatial",
-    "scipy.spatial._qhull",
-    "scipy.spatial._ckdtree",
+    # matplotlib.tri — replaces scipy.griddata (same Qhull C lib, already bundled)
+    "matplotlib.tri",
 
     # pandas — core only (CSV read + groupby + category dtype)
     "pandas",
@@ -50,9 +50,9 @@ hidden = [
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=[],
-    datas=mpl_data,          # matplotlib fonts/styles only (no scipy data)
-    hiddenimports=hidden,
+    binaries=numpy_binaries,
+    datas=mpl_data + numpy_datas,
+    hiddenimports=hidden + numpy_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -61,15 +61,15 @@ a = Analysis(
         "tkinter", "wx", "_tkinter",
 
         # scipy submodules not used by this app
-        "scipy.stats", "scipy.signal", "scipy.optimize",
-        "scipy.fft", "scipy.linalg", "scipy.io",
-        "scipy.ndimage", "scipy.odr", "scipy.sparse",
-        "scipy.cluster", "scipy.constants",
-        "scipy.interpolate._rbfinterp_pythran",
+        # scipy fully removed — replaced by matplotlib.tri in geometry.py
+        "scipy",
+        "scipy.interpolate", "scipy.spatial", "scipy.stats",
+        "scipy.signal", "scipy.optimize", "scipy.fft",
+        "scipy.linalg", "scipy.io", "scipy.ndimage",
+        "scipy.odr", "scipy.sparse", "scipy.cluster",
 
         # pandas extras not used
         "pandas.io.formats.style",
-        "pandas.plotting",
         "pandas.io.clipboard",
         "pandas.tests",
 
