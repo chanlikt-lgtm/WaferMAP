@@ -7,7 +7,7 @@ Responsibilities
 ----------------
 - Load and validate data.
 - Compute 8-condition statistics.
-- Render individual wafer PNG files (square variant + legend variant for PPTX).
+- Render individual wafer PNG files and per-page snapshots for PPTX export.
 - Call each exporter (PDF → CSV → PPTX) in sequence.
 - Clean up temporary directories.
 
@@ -112,24 +112,17 @@ def generate_report(
     base_name   = os.path.splitext(os.path.basename(filepath))[0]
     png_dir     = os.path.join(out_dir, f"individual_pngs_{timestamp}")
 
-    pptx_png_dir    = os.path.join(out_dir, "temp_pptx_images")
-    summary_img_dir = os.path.join(out_dir, "temp_summary_images")
+    pptx_page_dir = None
 
     os.makedirs(png_dir, exist_ok=True)
     if HAS_PPTX:
-        os.makedirs(pptx_png_dir,    exist_ok=True)
-        os.makedirs(summary_img_dir, exist_ok=True)
-
-    # ── Render individual wafer PNGs ──────────────────────────────────────
-    summary_8_png: str | None = (
-        os.path.join(summary_img_dir, "01_8_condition_summary.png")
-        if HAS_PPTX else None
-    )
+        pptx_page_dir = os.path.join(out_dir, f"temp_pptx_pages_{timestamp}")
+        os.makedirs(pptx_page_dir, exist_ok=True)
 
     _render_wafer_pngs(
         data, config,
         png_dir=png_dir,
-        pptx_png_dir=pptx_png_dir if HAS_PPTX else None,
+        pptx_png_dir=None,
         total_steps=total_steps,
         on_progress=on_progress,
         on_wafer_ready=on_wafer_ready,
@@ -148,7 +141,7 @@ def generate_report(
         filepath=filepath,
         out_dir=out_dir,
         timestamp=timestamp,
-        summary_8_png=summary_8_png,
+        page_png_dir=pptx_page_dir if HAS_PPTX else None,
     )
     print(f"✓ PDF saved: {pdf_path}")
 
@@ -164,18 +157,15 @@ def generate_report(
 
     # ── PowerPoint ────────────────────────────────────────────────────────
     current_step += 1
-    if HAS_PPTX:
+    if HAS_PPTX and pptx_page_dir is not None:
         _emit(on_progress, current_step, total_steps, "Building PowerPoint…")
-        summary_imgs: list[tuple[str, str]] = []
-        if summary_8_png and os.path.exists(summary_8_png):
-            summary_imgs.append(("8-Condition Distribution Summary", summary_8_png))
-
         pptx_path = os.path.join(
             out_dir, f"{base_name}{config.log_suffix}_{timestamp}.pptx"
         )
-        create_powerpoint_report(pptx_png_dir, pptx_path, base_name, summary_imgs)
-        _safe_rmtree(pptx_png_dir)
-        _safe_rmtree(summary_img_dir)
+        try:
+            create_powerpoint_report(pptx_page_dir, pptx_path, base_name)
+        finally:
+            _safe_rmtree(pptx_page_dir)
     else:
         _emit(on_progress, current_step, total_steps, "Skipping PowerPoint (not installed)")
         pptx_path = (
@@ -201,14 +191,12 @@ def _render_wafer_pngs(
     on_wafer_ready: WaferReadyCallback | None,
 ) -> None:
     """
-    Render two PNG variants for every valid wafer:
-        - Square (no legend, no title) → individual_pngs folder.
-        - Wide with legend             → temp_pptx_images folder (PPTX only).
+    Render archive PNGs for every valid wafer.
 
     Figures are always closed in a finally block so a mid-render exception
     cannot leak open Matplotlib figures and accumulate memory.
-    The square figure is fully closed and nulled before the legend figure is
-    opened, so only one figure lives in memory at a time.
+    When a PPTX directory is provided, an additional wide-with-legend variant
+    is emitted for that legacy path, but callers may pass None.
     """
     step = 0
     for lot_id, lot_df in data.groupby("lot"):
