@@ -144,17 +144,28 @@ def build_wafer_grid(
     xi, yi = np.meshgrid(lin_x, lin_y)
     del lin_x, lin_y  # consumed by meshgrid; free them now
 
-    # Primary interpolation — scipy works in float64 internally; cast result back
-    zi = griddata((x, y), z, (xi, yi), method="linear").astype(np.float32)
+    # Guard against degenerate point sets (collinear / single-row / single-column).
+    # Qhull requires points to span 2-D; if they don't, skip linear and go
+    # straight to nearest-neighbour which never calls Qhull.
+    x_range = float(np.ptp(x))
+    y_range = float(np.ptp(y))
+    _is_degenerate = x_range < 1e-9 or y_range < 1e-9 or len(x) < 3
 
-    # Fill NaN holes with nearest-neighbour (avoids blank patches near edges)
-    nan_mask = np.isnan(zi)
-    if nan_mask.any():
-        zi[nan_mask] = griddata(
-            (x, y), z,
-            (xi[nan_mask], yi[nan_mask]),
-            method="nearest",
-        )
+    if _is_degenerate:
+        zi = griddata((x, y), z, (xi, yi), method="nearest").astype(np.float32)
+        nan_mask = np.isnan(zi)
+    else:
+        # Primary interpolation — scipy works in float64 internally; cast result back
+        zi = griddata((x, y), z, (xi, yi), method="linear").astype(np.float32)
+
+        # Fill NaN holes with nearest-neighbour (avoids blank patches near edges)
+        nan_mask = np.isnan(zi)
+        if nan_mask.any():
+            zi[nan_mask] = griddata(
+                (x, y), z,
+                (xi[nan_mask], yi[nan_mask]),
+                method="nearest",
+            )
     del nan_mask  # free ~resolution² booleans
 
     # Clamp to suppress Scipy's occasional interpolation overshoot

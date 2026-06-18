@@ -421,10 +421,13 @@ class ScatterCanvas(FigureCanvas):
     _MAX_SCATTER = 200_000   # points beyond this are overplotted anyway; downsample
 
     def __init__(self) -> None:
-        self.fig, self.ax = plt.subplots(figsize=(6, 4), dpi=95)
+        self.fig, self.ax = plt.subplots(figsize=(9, 6), dpi=100)
         super().__init__(self.fig)
+        self.setMinimumHeight(520)
         self.fig.patch.set_facecolor(_MPL_BG)
         self._z:            np.ndarray | None = None   # value array only; no full df retained
+        self._wafer_codes:  np.ndarray | None = None   # int16 per-die wafer code
+        self._wafer_names:  list[str] | None  = None   # ordered wafer label strings
         self._t_low         = -90.0
         self._t_high        = -60.0
         self._high_is_green = False
@@ -440,10 +443,21 @@ class ScatterCanvas(FigureCanvas):
         self.ax.set_xticks([]); self.ax.set_yticks([])
         self.fig.tight_layout(); self.draw()
 
-    def update_plot(self, z: np.ndarray, t_low, t_high, high_is_green) -> None:
+    def update_plot(
+        self,
+        z: np.ndarray,
+        t_low,
+        t_high,
+        high_is_green,
+        wafer_codes: np.ndarray | None = None,
+        wafer_names: list[str] | None  = None,
+    ) -> None:
         self._z = z
+        self._wafer_codes = wafer_codes
+        self._wafer_names = wafer_names
         self._t_low = t_low
-        self._t_high = t_high; self._high_is_green = high_is_green
+        self._t_high = t_high
+        self._high_is_green = high_is_green
         self._render()
 
     def toggle_log_y(self) -> bool:
@@ -461,18 +475,30 @@ class ScatterCanvas(FigureCanvas):
         cb, cm, ca = (("#2ecc71","#f1c40f","#e74c3c") if not self._high_is_green
                       else ("#e74c3c","#f1c40f","#2ecc71"))
 
+        wc   = self._wafer_codes   # int16 per-die wafer code (may be None)
+        wnames = self._wafer_names or []
+        n_wafers = len(wnames)
+
         # ── Downsample for display ────────────────────────────────────────
-        # 13M+ points are heavily overplotted at s=4. A uniform random sample
-        # of 200k is visually identical but uses ~65× less memory.
         n_full = len(z_full)
+        rng = np.random.default_rng(seed=0)
         if n_full > self._MAX_SCATTER:
-            rng  = np.random.default_rng(seed=0)          # deterministic sample
             keep = np.sort(rng.choice(n_full, size=self._MAX_SCATTER, replace=False))
-            z    = z_full[keep]
-            x    = keep.astype(np.float32)                 # float32 — no int64 needed
+            z  = z_full[keep]
+            wc_s = wc[keep] if wc is not None else None
         else:
-            z = z_full
-            x = np.arange(n_full, dtype=np.float32)
+            z  = z_full
+            wc_s = wc
+
+        # ── Build X coordinates ───────────────────────────────────────────
+        # Wafer-as-X: jitter each point horizontally within its column so
+        # overplotted dies spread into a visible strip (strip / dot plot).
+        if wc_s is not None and n_wafers > 0:
+            jitter = rng.uniform(-0.35, 0.35, size=len(z)).astype(np.float32)
+            x = wc_s.astype(np.float32) + jitter
+            del jitter
+        else:
+            x = np.arange(len(z), dtype=np.float32)
 
         use_log_y = self._log_y and np.any(z_full > 0)
 
@@ -505,39 +531,57 @@ class ScatterCanvas(FigureCanvas):
                     bbox=dict(facecolor="white", edgecolor="#aaa",
                               boxstyle="round,pad=0.2", alpha=0.9))
 
-        # ── Three scatter calls (one per zone) instead of a per-point ────
-        # string color array.  np.where(..., "#xxxxxx", ...) on 13M elements
-        # builds a U7 Unicode array = 368 MB.  Three boolean masks + three
-        # single-colour PathCollections use ~12 MB total.
+        # ── Three scatter calls (one per zone) ────────────────────────────
         _kw = dict(s=4, alpha=0.55, linewidths=0)
         if use_log_y:
             pos_mask = z > 0
             z_p, x_p = z[pos_mask], x[pos_mask]
             del pos_mask
-            ax.scatter(x_p[z_p < lo],              z_p[z_p < lo],              color=cb, **_kw)
-            ax.scatter(x_p[(z_p >= lo) & (z_p <= hi)], z_p[(z_p >= lo) & (z_p <= hi)], color=cm, **_kw)
-            ax.scatter(x_p[z_p > hi],              z_p[z_p > hi],              color=ca, **_kw)
+            ax.scatter(x_p[z_p < lo],                    z_p[z_p < lo],                    color=cb, **_kw)
+            ax.scatter(x_p[(z_p >= lo) & (z_p <= hi)],   z_p[(z_p >= lo) & (z_p <= hi)],   color=cm, **_kw)
+            ax.scatter(x_p[z_p > hi],                    z_p[z_p > hi],                    color=ca, **_kw)
             del z_p, x_p
             ax.set_yscale("log")
         else:
-            ax.scatter(x[z < lo],              z[z < lo],              color=cb, **_kw)
-            ax.scatter(x[(z >= lo) & (z <= hi)], z[(z >= lo) & (z <= hi)], color=cm, **_kw)
-            ax.scatter(x[z > hi],              z[z > hi],              color=ca, **_kw)
+            ax.scatter(x[z < lo],                        z[z < lo],                        color=cb, **_kw)
+            ax.scatter(x[(z >= lo) & (z <= hi)],          z[(z >= lo) & (z <= hi)],          color=cm, **_kw)
+            ax.scatter(x[z > hi],                        z[z > hi],                        color=ca, **_kw)
             ax.set_ylim(y_bot, y_top)
 
+        # ── X axis: wafer labels or die index ─────────────────────────────
+        # Show only the wafer portion of the label (last token) to avoid
+        # long "LotID WaferNum" strings overlapping each other on the axis.
+        # If all names share a common lot prefix, display that lot in the
+        # axis label instead.
         n_shown = len(z)
-        ax.set_xlim(-n_full * 0.01, n_full * 1.01)
+        if wnames:
+            # Split "PF428324 01" → lot="PF428324", wnum="01"
+            parts_list = [n.rsplit(" ", 1) for n in wnames]
+            lots  = [p[0] for p in parts_list]
+            wnums = [p[-1] for p in parts_list]
+            common_lot = lots[0] if len(set(lots)) == 1 else None
+            tick_labels = wnums if common_lot else wnames
+
+            ax.set_xticks(np.arange(n_wafers))
+            ax.set_xticklabels(tick_labels, rotation=0, ha="center", fontsize=8)
+            ax.set_xlim(-0.6, n_wafers - 0.4)
+            suffix = f"  (showing {n_shown:,} of {n_full:,} dies)" if n_full > self._MAX_SCATTER else ""
+            xlabel = f"Wafer — Lot {common_lot}{suffix}" if common_lot else f"Wafer{suffix}"
+        else:
+            ax.set_xlim(-n_full * 0.01, n_full * 1.01)
+            xlabel = (
+                f"Die index  (showing {n_shown:,} of {n_full:,})" if n_full > self._MAX_SCATTER
+                else "Die index"
+            )
         ax.set_ylabel("Value", fontsize=10, fontweight="bold")
-        ax.set_xlabel(
-            f"Die index  (showing {n_shown:,} of {n_full:,})" if n_full > self._MAX_SCATTER
-            else "Die index",
-            fontsize=9, color="#555",
-        )
+        ax.set_xlabel(xlabel, fontsize=9, color="#555")
         ax.set_title("Threshold Scatter", fontsize=12, fontweight="bold")
-        ax.tick_params(labelsize=8)
+        ax.tick_params(axis="y", labelsize=8)
         ax.grid(axis="y", linestyle="--", alpha=0.4, color="#ccc")
+        ax.grid(axis="x", linestyle=":",  alpha=0.25, color="#ccc")
         for sp in ax.spines.values(): sp.set_edgecolor("#ccc")
-        self.fig.tight_layout(pad=1.2); self.draw()
+        self.fig.subplots_adjust(left=0.08, right=0.985, top=0.93, bottom=0.12)
+        self.draw()
         self.fig.canvas.flush_events()   # release stale PathCollection refs from previous render
 
 
@@ -682,14 +726,16 @@ class DataProcessorUI(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Wafer Map Tool  v2.3")
-        self.resize(1300, 820)
-        self.setMinimumSize(980, 660)
+        self.resize(1450, 900)
+        self.setMinimumSize(1100, 760)
         self.setStyleSheet(_STYLESHEET)
 
         self._worker: Optional[ReportWorker] = None
         self._wafer_count  = 0
         self._total_wafers = 0
         self._loaded_values: np.ndarray | None = None  # value column only; full df freed after load
+        self._loaded_wafer_codes: np.ndarray | None = None  # int16 per-die wafer code
+        self._loaded_wafer_names: list[str] | None = None   # ordered wafer label strings
         self._current_lot: str | None = None
         self._log_y_on     = False
         self._dark_mode    = True
@@ -947,11 +993,18 @@ class DataProcessorUI(QMainWindow):
         except Exception as exc:
             self._file_info.setText(f"⚠ {exc}")
             self._file_info.setStyleSheet(f"color:{_RED};font-size:10px;")
-            self._loaded_values = None; return
+            self._loaded_values = None
+            self._loaded_wafer_codes = None
+            self._loaded_wafer_names = None
+            return
         n_w = df.groupby(["lot", "wafer"]).ngroups
         self._total_wafers = n_w
         z = df["value"].to_numpy(dtype=np.float32, copy=False)  # view into df's buffer
-        del df                                               # frees x/y columns; z keeps value alive
+        # Build per-die wafer label for scatter X axis
+        wafer_cat = (df["lot"].astype(str) + " " + df["wafer"].astype(str)).astype("category")
+        self._loaded_wafer_codes = wafer_cat.cat.codes.to_numpy(dtype=np.int16, copy=True)
+        self._loaded_wafer_names = list(wafer_cat.cat.categories)
+        del df, wafer_cat                                    # frees x/y columns; z keeps value alive
         self._loaded_values = z
         self._file_info.setText(f"✓  {len(z):,} die points · {n_w} wafers")
         self._file_info.setStyleSheet(f"color:{_GREEN};font-size:13px;font-weight:700;")
@@ -962,7 +1015,10 @@ class DataProcessorUI(QMainWindow):
         t_low  = self.t_low_edit.value()
         t_high = self.t_high_edit.value()
         hig    = self.hig_chk.isChecked()
-        self._scatter_canvas.update_plot(self._loaded_values, t_low, t_high, hig)
+        self._scatter_canvas.update_plot(
+            self._loaded_values, t_low, t_high, hig,
+            self._loaded_wafer_codes, self._loaded_wafer_names,
+        )
         self._hist_widget.set_data(self._loaded_values, t_low, t_high, hig)
 
     def _toggle_log_y(self) -> None:
