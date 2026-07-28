@@ -28,6 +28,7 @@ def export_color_summary_csv(
     filepath: str,
     config: PlotConfig,
     out_dir: str,
+    data: "pd.DataFrame | None" = None,
 ) -> str | None:
     """
     Build and save a CSV summarising colour-zone presence per wafer.
@@ -44,11 +45,14 @@ def export_color_summary_csv(
     str | None
         Absolute path to the saved CSV, or None if no valid wafers found.
     """
-    try:
-        data = read_wafer_data(filepath)
-    except Exception as exc:
-        print(f"⚠  CSV export skipped — could not reload data: {exc}")
-        return None
+    # Reuse the already-loaded DataFrame when the caller passes it; only re-read
+    # from disk for standalone use (avoids a full second parse of large files).
+    if data is None:
+        try:
+            data = read_wafer_data(filepath)
+        except Exception as exc:
+            print(f"⚠  CSV export skipped — could not reload data: {exc}")
+            return None
 
     if data.empty:
         return None

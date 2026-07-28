@@ -9,16 +9,21 @@ Structure
 2. 8-condition bar chart  — overview of colour distribution
 3. Per-lot wafer pages    — 5×5 grid layout, one page per 25 wafers
 
-Bookmarks are injected via pypdf after the temp PDF is written.
+The per-lot grid pages are the expensive part (one interpolated wafer map per
+die group). They are independent, so they can be rendered in parallel across
+processes: each worker writes a single-page **vector** PDF, and the main process
+merges them with pypdf — so parallelism costs no quality. Falls back to
+sequential rendering if a process pool can't be created.
 
 Public API
 ----------
 generate_pdf(data, config, condition_result, filepath,
-             out_dir, timestamp, summary_8_png) -> str
+             out_dir, timestamp, page_png_dir=None, jobs=None, on_page=None) -> str
 """
 from __future__ import annotations
 
 import os
+import shutil
 from datetime import datetime
 
 import matplotlib.pyplot as plt
@@ -33,6 +38,41 @@ from ..statistics import ConditionCounts, create_8_condition_summary_page
 __all__ = ["generate_pdf"]
 
 
+# ---------------------------------------------------------------------------
+# Worker: render ONE 5×5 grid page to a single-page vector PDF (+ optional PNG).
+# Must stay top-level and picklable so it can run in a spawned process.
+# ---------------------------------------------------------------------------
+def _render_grid_page(job: tuple) -> int:
+    (grid_seq, page_pdf_path, page_png_path, lot_id, base_name,
+     display_counter, config, wafer_ids, page_df) = job
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as _plt
+    from matplotlib.backends.backend_pdf import PdfPages as _PdfPages
+
+    groups = {str(w): sub for w, sub in page_df.groupby("wafer")}
+    fig, axes = _plt.subplots(5, 5, figsize=(11.69, 8.27))
+    _plt.subplots_adjust(top=0.85, bottom=0.05, left=0.05, right=0.78,
+                         hspace=0.4, wspace=0.3)
+    _add_page_header(fig, lot_id, base_name, display_counter, config)
+    _add_page_legend(fig, config)
+    try:
+        for j, ax in enumerate(axes.flat):
+            if j < len(wafer_ids):
+                draw_wafer_ax(ax, groups[wafer_ids[j]], wafer_ids[j], config,
+                              show_legend=False, show_title=True)
+            else:
+                ax.axis("off")
+        with _PdfPages(page_pdf_path) as pp:
+            pp.savefig(fig)
+        if page_png_path:
+            fig.savefig(page_png_path, bbox_inches="tight", dpi=150)
+    finally:
+        _plt.close(fig)
+    return grid_seq
+
+
 def generate_pdf(
     data,
     config: PlotConfig,
@@ -40,86 +80,111 @@ def generate_pdf(
     filepath: str,
     out_dir: str,
     timestamp: str,
-    summary_8_png: str | None = None,
+    page_png_dir: str | None = None,
+    jobs: int | None = None,
+    on_page=None,
 ) -> str:
     """
     Build the complete PDF report.
 
-    Parameters
-    ----------
-    data             : Full wafer DataFrame (lot, wafer, x, y, value).
-    config           : PlotConfig with all user settings.
-    condition_result : Pre-computed 8-condition statistics.
-    filepath         : Original input file (used for naming and metadata).
-    out_dir          : Output directory.
-    timestamp        : Timestamp string used in the file name.
-    summary_8_png    : Optional path to also save the bar-chart page as PNG.
-
-    Returns
-    -------
-    str : Absolute path to the final PDF.
+    jobs : None → auto (min(cpu_count, 8)); 1 → sequential; N → N worker
+           processes. Parallelism only kicks in for reports with a few grid
+           pages (spawn overhead isn't worth it for tiny reports).
+    on_page : optional callback(done, total) fired as grid pages complete.
     """
     base_name = os.path.splitext(os.path.basename(filepath))[0]
-    temp_pdf  = os.path.join(out_dir, f"temp_{base_name}{config.log_suffix}_{timestamp}.pdf")
     final_pdf = os.path.join(out_dir, f"{base_name}{config.log_suffix}_{timestamp}.pdf")
-
-    bookmarks:       list[tuple[str, int]] = []
-    pdf_page_idx:    int = 0
-    display_counter: int = 1
+    tmp_dir   = os.path.join(out_dir, f"_pdf_pages_{timestamp}")
+    os.makedirs(tmp_dir, exist_ok=True)
+    head_pdf  = os.path.join(tmp_dir, "head.pdf")
 
     lot_groups = data.groupby("lot")
+    bookmarks: list[tuple[str, int]] = []
 
-    with PdfPages(temp_pdf) as pdf:
-
-        # ── 1. Summary text ───────────────────────────────────────────────
-        bookmarks.append(("Summary Report", pdf_page_idx))
+    # ── HEAD: summary text + 8-condition chart (main process; cheap) ────────
+    with PdfPages(head_pdf) as pdf:
+        bookmarks.append(("Summary Report", 0))
         display_counter, pdf_page_idx = _write_summary_text(
-            pdf, lot_groups, filepath, config, display_counter, pdf_page_idx
+            pdf, lot_groups, filepath, config, 1, 0, page_png_dir=page_png_dir,
         )
-
-        # ── 2. 8-condition chart ──────────────────────────────────────────
         bookmarks.append(("8-Condition Distribution", pdf_page_idx))
         display_counter = create_8_condition_summary_page(
             pdf, condition_result, config, filepath, display_counter,
-            save_png_path=summary_8_png,
+            save_png_path=_page_png_path(
+                page_png_dir, display_counter, "8_condition_distribution"),
         )
-        pdf_page_idx = display_counter - 1
+    n_head = len(PdfReader(head_pdf).pages)
 
-        # ── 3. Per-lot wafer grid pages ───────────────────────────────────
-        for lot_id, lot_df in lot_groups:
-            bookmarks.append((f"Lot: {lot_id}{config.log_suffix}", pdf_page_idx))
-            wafer_ids    = sorted(lot_df["wafer"].unique())
-            wafer_groups = lot_df.groupby("wafer")
+    # ── Build the per-lot grid-page jobs ────────────────────────────────────
+    grid_jobs: list[tuple] = []
+    grid_seq = 0
+    dc = display_counter
+    for lot_id, lot_df in lot_groups:
+        wafer_ids = [str(w) for w in sorted(lot_df["wafer"].astype(str).unique())]
+        for batch_start in range(0, len(wafer_ids), MAX_WAFERS_PER_PAGE):
+            batch = wafer_ids[batch_start: batch_start + MAX_WAFERS_PER_PAGE]
+            if batch_start == 0:
+                bookmarks.append((f"Lot: {lot_id}{config.log_suffix}", n_head + grid_seq))
+            # Slice this page's data; drop the category dtype so the pickle sent
+            # to a worker doesn't drag the whole (50k-wide) categorical index.
+            mask = lot_df["wafer"].astype(str).isin(batch)
+            sub = lot_df.loc[mask, ["wafer", "x", "y", "value"]].copy()
+            sub["wafer"] = sub["wafer"].astype(str)
+            png_path = _page_png_path(
+                page_png_dir, dc,
+                f"lot_{lot_id}_page_{batch_start // MAX_WAFERS_PER_PAGE + 1}")
+            grid_jobs.append((
+                grid_seq, os.path.join(tmp_dir, f"page_{grid_seq:04d}.pdf"),
+                png_path, str(lot_id), base_name, dc, config, batch, sub,
+            ))
+            grid_seq += 1
+            dc += 1
 
-            for batch_start in range(0, len(wafer_ids), MAX_WAFERS_PER_PAGE):
-                batch = wafer_ids[batch_start: batch_start + MAX_WAFERS_PER_PAGE]
-                fig, axes = plt.subplots(5, 5, figsize=(11.69, 8.27))
-                plt.subplots_adjust(
-                    top=0.85, bottom=0.05, left=0.05, right=0.78,
-                    hspace=0.4, wspace=0.3,
-                )
+    # ── Render grid pages (parallel when it pays off, else sequential) ──────
+    _render_all_grid_pages(grid_jobs, jobs, on_page)
 
-                _add_page_header(fig, lot_id, base_name, display_counter, config)
-                _add_page_legend(fig, config)
+    # ── Merge head + grid pages in order, attach bookmarks ──────────────────
+    writer = PdfWriter()
+    for page in PdfReader(head_pdf).pages:
+        writer.add_page(page)
+    for gs in range(len(grid_jobs)):
+        page_pdf = os.path.join(tmp_dir, f"page_{gs:04d}.pdf")
+        for page in PdfReader(page_pdf).pages:
+            writer.add_page(page)
+    for title, page_num in bookmarks:
+        writer.add_outline_item(title=title, page_number=page_num)
+    with open(final_pdf, "wb") as fh:
+        writer.write(fh)
 
-                for j, ax in enumerate(axes.flat):
-                    abs_idx = batch_start + j
-                    if abs_idx < len(wafer_ids):
-                        draw_wafer_ax(
-                            ax, wafer_groups.get_group(wafer_ids[abs_idx]),
-                            wafer_ids[abs_idx], config,
-                            show_legend=False, show_title=True,
-                        )
-                    else:
-                        ax.axis("off")
-
-                pdf.savefig(fig)
-                plt.close(fig)
-                display_counter += 1
-                pdf_page_idx    += 1
-
-    _attach_bookmarks(temp_pdf, final_pdf, bookmarks)
+    shutil.rmtree(tmp_dir, ignore_errors=True)
     return final_pdf
+
+
+def _render_all_grid_pages(grid_jobs, jobs, on_page) -> None:
+    """Render every grid-page job to its temp PDF, in parallel if worthwhile."""
+    total = len(grid_jobs)
+    if total == 0:
+        return
+
+    want = (jobs is None or jobs > 1)
+    n_workers = (jobs if (jobs and jobs > 1) else (os.cpu_count() or 1))
+    n_workers = max(1, min(n_workers, 8, total))
+
+    if want and n_workers > 1 and total >= 3:
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=n_workers) as ex:
+                for done, _ in enumerate(ex.map(_render_grid_page, grid_jobs), 1):
+                    if on_page:
+                        on_page(done, total)
+            return
+        except Exception as exc:  # pool unavailable / worker crash → sequential
+            print(f"⚠  Parallel PDF render failed ({exc}); using sequential.")
+
+    for done, job in enumerate(grid_jobs, 1):
+        _render_grid_page(job)
+        if on_page:
+            on_page(done, total)
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +194,7 @@ def generate_pdf(
 def _write_summary_text(
     pdf, lot_groups, filepath: str, config: PlotConfig,
     display_counter: int, pdf_page_idx: int,
+    page_png_dir: str | None = None,
 ) -> tuple[int, int]:
     """Write one or more text-only summary pages to *pdf*."""
     header = (
@@ -151,6 +217,11 @@ def _write_summary_text(
         fig.text(0.98, 0.02, f"Page {display_counter}",
                  fontsize=11, fontweight="bold", ha="right", va="bottom")
         pdf.savefig(fig)
+        page_png_path = _page_png_path(
+            page_png_dir, display_counter, f"summary_report_page_{display_counter}"
+        )
+        if page_png_path:
+            fig.savefig(page_png_path, bbox_inches="tight", dpi=150)
         plt.close(fig)
         display_counter += 1
         pdf_page_idx    += 1
@@ -181,19 +252,15 @@ def _add_page_legend(fig, config: PlotConfig) -> None:
     )
 
 
-def _attach_bookmarks(
-    temp_path: str,
-    final_path: str,
-    bookmarks: list[tuple[str, int]],
-) -> None:
-    """Copy pages from *temp_path* into *final_path*, adding PDF bookmarks."""
-    reader = PdfReader(temp_path)
-    writer = PdfWriter()
-    for page in reader.pages:
-        writer.add_page(page)
-    for title, page_num in bookmarks:
-        writer.add_outline_item(title=title, page_number=page_num)
-    with open(final_path, "wb") as fh:
-        writer.write(fh)
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
+def _page_png_path(
+    page_png_dir: str | None,
+    page_number: int,
+    label: str,
+) -> str | None:
+    if not page_png_dir:
+        return None
+
+    safe_label = "".join(ch if ch.isalnum() else "_" for ch in str(label)).strip("_")
+    if not safe_label:
+        safe_label = "page"
+    return os.path.join(page_png_dir, f"{page_number:03d}_{safe_label}.png")

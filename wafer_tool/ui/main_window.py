@@ -33,7 +33,7 @@ from PyQt6.QtGui     import (
 from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QFileDialog,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
-    QMainWindow, QProgressBar, QPushButton, QRadioButton, QButtonGroup,
+    QMainWindow, QMessageBox, QProgressBar, QPushButton, QRadioButton, QButtonGroup,
     QSizePolicy, QSpacerItem, QSplitter, QStatusBar,
     QTabWidget, QVBoxLayout, QWidget,
 )
@@ -419,6 +419,8 @@ class WaferGridWidget(QWidget):
 
 class ScatterCanvas(FigureCanvas):
     _MAX_SCATTER = 200_000   # points beyond this are overplotted anyway; downsample
+    _MAX_XTICKS  = 60        # above this, per-wafer tick labels are unreadable AND
+                             # slow — a 50k-wafer file froze the UI here; use sparse ticks
 
     def __init__(self) -> None:
         self.fig, self.ax = plt.subplots(figsize=(9, 6), dpi=100)
@@ -426,7 +428,7 @@ class ScatterCanvas(FigureCanvas):
         self.setMinimumHeight(520)
         self.fig.patch.set_facecolor(_MPL_BG)
         self._z:            np.ndarray | None = None   # value array only; no full df retained
-        self._wafer_codes:  np.ndarray | None = None   # int16 per-die wafer code
+        self._wafer_codes:  np.ndarray | None = None   # int32 per-die wafer code
         self._wafer_names:  list[str] | None  = None   # ordered wafer label strings
         self._t_low         = -90.0
         self._t_high        = -60.0
@@ -475,7 +477,7 @@ class ScatterCanvas(FigureCanvas):
         cb, cm, ca = (("#2ecc71","#f1c40f","#e74c3c") if not self._high_is_green
                       else ("#e74c3c","#f1c40f","#2ecc71"))
 
-        wc   = self._wafer_codes   # int16 per-die wafer code (may be None)
+        wc   = self._wafer_codes   # int32 per-die wafer code (may be None)
         wnames = self._wafer_names or []
         n_wafers = len(wnames)
 
@@ -562,11 +564,23 @@ class ScatterCanvas(FigureCanvas):
             common_lot = lots[0] if len(set(lots)) == 1 else None
             tick_labels = wnums if common_lot else wnames
 
-            ax.set_xticks(np.arange(n_wafers))
-            ax.set_xticklabels(tick_labels, rotation=0, ha="center", fontsize=8)
+            # With thousands of wafers, one Text label per wafer is unreadable
+            # and pathologically slow to lay out (it froze the UI on a 50k-wafer
+            # file). Above the cap, thin the ticks to an evenly-spaced subset.
+            if n_wafers > self._MAX_XTICKS:
+                idx = np.linspace(0, n_wafers - 1, self._MAX_XTICKS).round().astype(int)
+                idx = np.unique(idx)
+                ax.set_xticks(idx)
+                ax.set_xticklabels([tick_labels[i] for i in idx],
+                                   rotation=90, ha="center", fontsize=7)
+            else:
+                ax.set_xticks(np.arange(n_wafers))
+                ax.set_xticklabels(tick_labels, rotation=0, ha="center", fontsize=8)
             ax.set_xlim(-0.6, n_wafers - 0.4)
             suffix = f"  (showing {n_shown:,} of {n_full:,} dies)" if n_full > self._MAX_SCATTER else ""
-            xlabel = f"Wafer — Lot {common_lot}{suffix}" if common_lot else f"Wafer{suffix}"
+            many = f"  ·  {n_wafers:,} wafers" if n_wafers > self._MAX_XTICKS else ""
+            xlabel = (f"Wafer — Lot {common_lot}{suffix}{many}" if common_lot
+                      else f"Wafer{suffix}{many}")
         else:
             ax.set_xlim(-n_full * 0.01, n_full * 1.01)
             xlabel = (
@@ -734,7 +748,7 @@ class DataProcessorUI(QMainWindow):
         self._wafer_count  = 0
         self._total_wafers = 0
         self._loaded_values: np.ndarray | None = None  # value column only; full df freed after load
-        self._loaded_wafer_codes: np.ndarray | None = None  # int16 per-die wafer code
+        self._loaded_wafer_codes: np.ndarray | None = None  # int32 per-die wafer code
         self._loaded_wafer_names: list[str] | None = None   # ordered wafer label strings
         self._current_lot: str | None = None
         self._log_y_on     = False
@@ -784,10 +798,22 @@ class DataProcessorUI(QMainWindow):
         self._file_info = QLabel("")
         self._file_info.setStyleSheet(f"color:{_MUTED};font-size:10px;")
         self._file_info.setWordWrap(True)
+        # ── Saved/scheduled jobs: track the newest file in the folder ───────
+        self.newest_chk = QCheckBox("For saved / scheduled jobs, use the newest file in this folder")
+        self.newest_chk.setToolTip(
+            "When you Save Job, record the file's folder + a name pattern instead of "
+            "this exact file, so each scheduled run picks the newest matching file.")
+        self.pattern_edit = QLineEdit("*.txt")
+        self.pattern_edit.setToolTip("Name pattern(s) to match; separate several with ';', e.g.  *.txt;*.csv")
+        self.pattern_edit.setEnabled(False)
+        self.newest_chk.toggled.connect(self.pattern_edit.setEnabled)
         g.addWidget(_L("Data file:"),  0, 0, 1, 2)
         g.addWidget(self.file_edit,    1, 0)
         g.addWidget(btn,               1, 1)
         g.addWidget(self._file_info,   2, 0, 1, 2)
+        g.addWidget(self.newest_chk,   3, 0, 1, 2)
+        g.addWidget(_L("Match pattern:"), 4, 0)
+        g.addWidget(self.pattern_edit, 4, 1)
         return b
 
     def _grp_thresh(self) -> QGroupBox:
@@ -863,6 +889,23 @@ class DataProcessorUI(QMainWindow):
         self.cancel_btn.setObjectName("cancel_btn")
         self.cancel_btn.setEnabled(False)
         v.addWidget(self.run_btn); v.addWidget(self.cancel_btn)
+
+        # ── Automation: save this run as a job, or schedule saved jobs ──────
+        auto_row = QHBoxLayout(); auto_row.setSpacing(6)
+        self.save_job_btn = QPushButton("💾  Save Job")
+        self.save_job_btn.setObjectName("open_btn")
+        self.save_job_btn.setToolTip(
+            "Save the current data file, output folder and all plot settings as a "
+            ".wtjob you can re-run or schedule offline.")
+        self.save_job_btn.clicked.connect(self._save_job)
+        self.schedule_btn = QPushButton("🕑  Schedule…")
+        self.schedule_btn.setObjectName("open_btn")
+        self.schedule_btn.setToolTip(
+            "Schedule a saved .wtjob to run automatically (daily / weekly / monthly), "
+            "offline via Windows Task Scheduler.")
+        self.schedule_btn.clicked.connect(self._open_scheduler)
+        auto_row.addWidget(self.save_job_btn); auto_row.addWidget(self.schedule_btn)
+        v.addLayout(auto_row)
         return w
 
     # ── RIGHT panel ───────────────────────────────────────────────────────
@@ -1002,7 +1045,10 @@ class DataProcessorUI(QMainWindow):
         z = df["value"].to_numpy(dtype=np.float32, copy=False)  # view into df's buffer
         # Build per-die wafer label for scatter X axis
         wafer_cat = (df["lot"].astype(str) + " " + df["wafer"].astype(str)).astype("category")
-        self._loaded_wafer_codes = wafer_cat.cat.codes.to_numpy(dtype=np.int16, copy=True)
+        # int32, not int16: files can have far more than 32,767 wafers, and an
+        # int16 code overflows past that — wrapping to negatives so every wafer
+        # beyond #32767 plotted off-screen (dense block on the left, empty right).
+        self._loaded_wafer_codes = wafer_cat.cat.codes.to_numpy(dtype=np.int32, copy=True)
         self._loaded_wafer_names = list(wafer_cat.cat.categories)
         del df, wafer_cat                                    # frees x/y columns; z keeps value alive
         self._loaded_values = z
@@ -1055,6 +1101,59 @@ class DataProcessorUI(QMainWindow):
             if sys.platform == "win32":    os.startfile(p)
             elif sys.platform == "darwin": subprocess.Popen(["open", p])
             else:                          subprocess.Popen(["xdg-open", p])
+
+    def _gather_job(self):
+        """Validate the current inputs and return a WaferJob, or None (a status
+        message is shown). Shared by Save Job; mirrors _run's validation."""
+        from wafer_tool.automation.job import WaferJob
+        fp  = self.file_edit.text().strip()
+        out = self.out_edit.text().strip()
+        if not fp or not os.path.isfile(fp):
+            self._status("⚠  Select a valid data file.", _RED); return None
+        if not out:
+            self._status("⚠  Select an output directory.", _RED); return None
+        if not self.t_low_edit.is_valid() or not self.t_high_edit.is_valid():
+            self._status("⚠  Invalid threshold value.", _RED); return None
+        t_low, t_high = self.t_low_edit.value(), self.t_high_edit.value()
+        if t_low == t_high:
+            self._status("⚠  Limit 1 and Limit 2 must differ.", _RED); return None
+        rot_deg = [0, 90, 180, 270][self._rot_group.checkedId()]
+        # Folder mode: record the file's folder + pattern so each scheduled run
+        # picks the newest matching file instead of this exact one.
+        input_dir, pattern = "", "*.txt"
+        if self.newest_chk.isChecked():
+            input_dir = os.path.dirname(fp)
+            pattern = self.pattern_edit.text().strip() or "*.txt"
+        return WaferJob(
+            input_file=fp, out_dir=out, t_low=t_low, t_high=t_high,
+            use_log=self.log_chk.isChecked(), high_is_green=self.hig_chk.isChecked(),
+            mirror_x=self.mirx_chk.isChecked(), mirror_y=self.miry_chk.isChecked(),
+            rot_deg=rot_deg, input_dir=input_dir, input_pattern=pattern,
+        )
+
+    def _save_job(self) -> None:
+        """Save the current run as a .wtjob, then offer to open the scheduler."""
+        from wafer_tool.automation.job import save_job, JOB_SUFFIX
+        job = self._gather_job()
+        if job is None:
+            return
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Job", "wafer_job" + JOB_SUFFIX, f"Wafer Job (*{JOB_SUFFIX})")
+        if not path:
+            return
+        saved = save_job(path, job)
+        self._status(f"Saved job: {os.path.basename(saved)}", _GREEN)
+        ret = QMessageBox.question(
+            self, "Job Saved",
+            f"Saved {os.path.basename(saved)}.\n\nRuns offline with:\n"
+            f"python run_job.py \"{saved}\"\n\nOpen the scheduler to run it automatically?")
+        if ret == QMessageBox.StandardButton.Yes:
+            from wafer_tool.automation.scheduler_dialog import SchedulerDialog
+            SchedulerDialog(self, initial_job=str(saved)).exec()
+
+    def _open_scheduler(self) -> None:
+        from wafer_tool.automation.scheduler_dialog import SchedulerDialog
+        SchedulerDialog(self).exec()
 
     def _run(self) -> None:
         fp  = self.file_edit.text().strip()

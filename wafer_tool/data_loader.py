@@ -47,20 +47,22 @@ def read_wafer_data(
     elif raw.shape[1] >= 4:
         combined = raw.iloc[:, 0].astype(str).str.strip()
 
-        # Split into lot + wafer
-        parts = combined.str.split()
-        if parts.map(len).lt(2).any():
+        # Split "LotID WaferID" in one vectorized pass. str.split(n=1, expand)
+        # is far faster on large files than split()+map(len)+str[0]/str[1],
+        # which each iterate in Python over every row.
+        split_df = combined.str.split(n=1, expand=True)
+        if split_df.shape[1] < 2 or split_df.iloc[:, 1].isna().any():
             raise DataLoadError(
                 "Could not split lot+wafer column. "
                 "Expected either 5 columns or 'LotID WaferID' in column 0."
             )
 
-        lot_series   = parts.str[0].astype(str).str.strip()
-        wafer_series = parts.str[1].astype(str).str.strip()
+        lot_series   = split_df.iloc[:, 0].str.strip()
+        wafer_series = split_df.iloc[:, 1].str.strip()
 
         # 🚨 extra protection
         lot_series = lot_series.replace({"": "UNKNOWN"})
-        del combined  # no longer needed
+        del combined, split_df  # no longer needed
 
         x_series   = pd.to_numeric(raw.iloc[:, 1], errors="coerce").astype("float32")
         y_series   = pd.to_numeric(raw.iloc[:, 2], errors="coerce").astype("float32")
@@ -105,31 +107,53 @@ def read_wafer_data(
 
 
 def _try_read(filepath: Path) -> pd.DataFrame:
+    """Read the file into a DataFrame, fast.
 
-    strategies = [
-        ("CSV (comma)",    {"sep": ",",     "engine": "c"}),
-        ("whitespace/tab", {"sep": r"\s+",  "engine": "python"}),  # regex sep needs python engine
-    ]
-
+    Two things keep large files fast:
+      * the C engine with an explicit delimiter (tab, then comma) — the regex
+        whitespace strategy uses pandas' pure-Python engine, which is minutes-
+        slow on large files (it froze the UI on a 388k-row file) and is only a
+        last resort;
+      * numeric columns are parsed NATIVELY by the C engine instead of being
+        read as text and converted afterwards with pd.to_numeric (that
+        conversion alone was ~2.4 s of a 388k-row load). Only the identifier
+        columns are forced to text so leading-zero wafer ids like "01" survive:
+        col 0 always (lot, or "lot wafer"), and col 1 too when lot/wafer are
+        already split into their own columns (5+ column files).
+    """
     last_exc: Exception | None = None
 
-    for label, kwargs in strategies:
+    for label, sep in (("tab-delimited", "\t"), ("CSV (comma)", ",")):
         try:
-            df = pd.read_csv(
-                filepath,
-                header=None,
-                dtype=str,        # prevent 'inf'/'nan'/etc. being cast to float
-                keep_default_na=False,  # keep empty cells as '' not NaN
-                **kwargs,
-            )
-            if df.shape[1] >= 4:
-                print(f"✓ Parsed '{filepath.name}' as {label}.")
-                return df
-
-            print(f"  {label}: only {df.shape[1]} column(s) — skipping.")
+            sample = pd.read_csv(filepath, header=None, sep=sep, engine="c",
+                                 dtype=str, nrows=50)
+        except Exception as exc:
+            last_exc = exc
+            continue
+        if sample.shape[1] < 4:
+            print(f"  {label}: only {sample.shape[1]} column(s) — skipping.")
+            continue
+        text_cols = {0: "str"} if sample.shape[1] == 4 else {0: "str", 1: "str"}
+        try:
+            df = pd.read_csv(filepath, header=None, sep=sep, engine="c", dtype=text_cols)
         except Exception as exc:
             print(f"  {label} parse failed: {exc}")
             last_exc = exc
+            continue
+        for c in text_cols:                 # keep empty identifiers as '' not NaN
+            df[c] = df[c].fillna("")
+        print(f"✓ Parsed '{filepath.name}' as {label}.")
+        return df
+
+    # Last resort: whitespace via the slow pure-Python regex engine.
+    try:
+        df = pd.read_csv(filepath, header=None, sep=r"\s+", engine="python",
+                         dtype=str, keep_default_na=False)
+        if df.shape[1] >= 4:
+            print(f"✓ Parsed '{filepath.name}' as whitespace (regex, slow).")
+            return df
+    except Exception as exc:
+        last_exc = exc
 
     raise DataLoadError(
         f"Could not parse '{filepath.name}' as CSV or delimited text. "

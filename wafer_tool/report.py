@@ -60,6 +60,8 @@ def generate_report(
     out_dir: str,
     on_progress: ProgressCallback | None = None,
     on_wafer_ready: WaferReadyCallback | None = None,
+    render_individual_pngs: bool | None = None,
+    jobs: int | None = None,
 ) -> tuple[str, str | None, str]:
     """
     End-to-end report pipeline.
@@ -114,20 +116,30 @@ def generate_report(
 
     pptx_page_dir = None
 
-    os.makedirs(png_dir, exist_ok=True)
-    if HAS_PPTX:
+    # The per-wafer "individual" PNGs exist only to feed a live GUI preview via
+    # on_wafer_ready — nothing in the PDF/CSV/PPTX uses them. So render them only
+    # when someone is watching. Headless/scheduled runs (no on_wafer_ready) skip
+    # this whole pass, which was ~40% of the runtime. Callers can force it either
+    # way with render_individual_pngs=True/False.
+    want_pngs = (on_wafer_ready is not None) if render_individual_pngs is None \
+        else bool(render_individual_pngs)
+    if want_pngs:
+        os.makedirs(png_dir, exist_ok=True)
+        if HAS_PPTX:
+            pptx_page_dir = os.path.join(out_dir, f"temp_pptx_pages_{timestamp}")
+            os.makedirs(pptx_page_dir, exist_ok=True)
+        _render_wafer_pngs(
+            data, config,
+            png_dir=png_dir,
+            pptx_png_dir=None,
+            total_steps=total_steps,
+            on_progress=on_progress,
+            on_wafer_ready=on_wafer_ready,
+        )
+        gc.collect()  # release matplotlib figure cache accumulated during render loop
+    elif HAS_PPTX:
         pptx_page_dir = os.path.join(out_dir, f"temp_pptx_pages_{timestamp}")
         os.makedirs(pptx_page_dir, exist_ok=True)
-
-    _render_wafer_pngs(
-        data, config,
-        png_dir=png_dir,
-        pptx_png_dir=None,
-        total_steps=total_steps,
-        on_progress=on_progress,
-        on_wafer_ready=on_wafer_ready,
-    )
-    gc.collect()  # release matplotlib figure cache accumulated during render loop
 
     current_step = total_steps - 3
 
@@ -142,13 +154,16 @@ def generate_report(
         out_dir=out_dir,
         timestamp=timestamp,
         page_png_dir=pptx_page_dir if HAS_PPTX else None,
+        jobs=jobs,
+        on_page=lambda d, t: _emit(on_progress, current_step, total_steps,
+                                   f"Generating PDF… page {d}/{t}"),
     )
     print(f"✓ PDF saved: {pdf_path}")
 
     # ── CSV ───────────────────────────────────────────────────────────────
     current_step += 1
     _emit(on_progress, current_step, total_steps, "Exporting CSV…")
-    csv_path = export_color_summary_csv(filepath, config, out_dir)
+    csv_path = export_color_summary_csv(filepath, config, out_dir, data=data)
 
     # data is no longer needed — free it before the PPTX step which only
     # reads pre-rendered PNGs from disk.
