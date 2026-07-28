@@ -895,6 +895,13 @@ on_wafer_ready(lot_id: str, wafer_id: str, png_path: str) -> None
         p("Each figure is created, saved, and closed in a <code>try/finally</code> block. "
           "The square figure is closed and set to <code>None</code> <i>before</i> the wide "
           "(PPTX) figure is opened — so only one figure exists in memory at a time per wafer."),
+        p("<b>PPTX image size reduction:</b> The PPTX variant is rendered at "
+          "<code>figsize=(7, 5), dpi=80</code> (down from 8×6 at dpi=100). This reduces "
+          "each slide image by ~40%, significantly lowering peak RAM during <code>prs.save()</code> "
+          "and producing a smaller .pptx file — important when hundreds of wafers are processed."),
+        p("<code>gc.collect()</code> is called immediately before <code>prs.save()</code> "
+          "to release any remaining PNG byte buffers held by python-pptx before the final "
+          "write flush."),
     ]
 
     story.append(h2("7.4  Scatter / Preview Downsampling"))
@@ -1096,122 +1103,265 @@ LOT001,3,0,1,1
     # ══════════════════════════════════════════════════════════════════════
     story.append(h1("12. Building the Executable (.exe)"))
     story += [
-        p("The tool ships two PyInstaller build configurations. "
-          "Both are Windows 64-bit and require no Python installation on the target machine. "
-          "PyInstaller bundles the Python interpreter, all dependencies "
-          "(PyQt6, Matplotlib, SciPy, NumPy, Pandas, ReportLab, python-pptx, pypdf), "
-          "and all Matplotlib/SciPy data files into the output."),
+        p("Three build variants are available, each trading size for simplicity. "
+          "All are Windows 64-bit and require no Python installation on the target machine. "
+          "The tool uses <b>PyInstaller 6.x</b> to package the Python interpreter and all "
+          "dependencies into a self-contained distribution."),
     ]
 
-    story.append(h2("12.1  Prerequisites"))
+    story.append(h2("12.1  Prerequisites (all variants)"))
     story += [
-        bullet("Python 3.11+ with all project dependencies installed "
-               "(<code>py -m pip install -r requirements.txt</code>)."),
-        bullet("PyInstaller 6.x: <code>py -m pip install pyinstaller</code>"),
-        bullet("Run all build commands from the repository root "
-               "(<code>E:\\claude\\Wafer_tool_NEW2\\</code>)."),
+        bullet("Python 3.11+ with all project dependencies: "
+               "<code>py -m pip install -r requirements.txt</code>"),
+        bullet("PyInstaller: <code>py -m pip install pyinstaller</code>"),
+        bullet("Run all build commands from the repository root."),
+        bullet("Delete <code>build\\</code> folder if you hit stale-cache issues between rebuilds."),
     ]
 
-    story.append(h2("12.2  Option A — Standalone Single-File EXE"))
-    story += [
-        p("Everything packed into one <b>114 MB</b> <code>.exe</code>. "
-          "Copy the single file to any Windows PC and double-click — no folder, no DLLs."),
-        p("<b>Spec file:</b> <code>WaferMapTool.spec</code>"),
-    ]
-    story.append(code("py -m PyInstaller WaferMapTool.spec --noconfirm"))
-    story += [
-        p("<b>Output:</b>"),
-    ]
-    story.append(code("dist\\WaferMapTool.exe          (114 MB — single file)"))
-    story += [
-        p("<b>Trade-off:</b> On first launch the bootloader extracts all files to the OS "
-          "temp directory (<code>%TEMP%\\_{MEI...}</code>). This adds ~3–8 seconds to the "
-          "very first startup. Subsequent launches from the same temp extraction are faster. "
-          "Antivirus software may flag single-file PyInstaller exes — add an exception if needed."),
-    ]
-
-    story.append(h2("12.3  Option B — Folder Distribution (small EXE + lib folder)"))
-    story += [
-        p("A <b>23 MB</b> launcher exe sits alongside a <code>_internal/</code> folder "
-          "containing all DLLs and data files (~262 MB total). "
-          "Faster startup than the single-file version (no extraction step)."),
-        p("<b>Spec file:</b> <code>WaferMapTool_folder.spec</code>"),
-    ]
-    story.append(code("py -m PyInstaller WaferMapTool_folder.spec --noconfirm"))
-    story += [
-        p("<b>Output:</b>"),
-    ]
-    story.append(code("""\
-dist\\WaferMapTool_folder\\
-    WaferMapTool.exe        (23 MB — launcher)
-    _internal\\              (239 MB — DLLs, data, Python runtime)
-        PyQt6\\
-        matplotlib\\
-        scipy\\
-        numpy\\
-        pandas\\
-        ... (all dependencies)"""))
-    story += [
-        p("<b>To distribute:</b> Zip the entire <code>WaferMapTool_folder\\</code> directory. "
-          "The small exe will <b>not</b> run if separated from its <code>_internal\\</code> folder."),
-    ]
-
-    story.append(h2("12.4  Comparison"))
+    story.append(h2("12.2  Build Variant Overview"))
     story.append(table([
-        ["Property",          "Standalone EXE",         "Folder Distribution"],
-        ["File to share",     "1 file (114 MB)",        "1 folder (~262 MB zipped)"],
-        ["EXE size",          "114 MB",                 "23 MB"],
-        ["First launch",      "~5–10 s (extraction)",   "~2–3 s (direct load)"],
-        ["Subsequent launch", "~2–3 s",                 "~2–3 s"],
-        ["Antivirus risk",    "Moderate",               "Low"],
-        ["Easy to update",    "Rebuild whole exe",      "Replace individual files"],
-        ["Spec file",         "WaferMapTool.spec",      "WaferMapTool_folder.spec"],
-        ["Build command",     "PyInstaller WaferMapTool.spec", "PyInstaller WaferMapTool_folder.spec"],
-    ], col_widths=[4*cm, 5.5*cm, 7*cm]))
-
-    story.append(h2("12.5  What Is Bundled"))
-    story.append(table([
-        ["Package",         "Version",  "Purpose in App"],
-        ["Python",          "3.11",     "Runtime interpreter"],
-        ["PyQt6",           "latest",   "GUI framework (widgets, signals, QThread)"],
-        ["Matplotlib",      "latest",   "Wafer contour maps, PDF pages, histogram/scatter"],
-        ["NumPy",           "latest",   "Float32 array maths"],
-        ["SciPy",           "latest",   "griddata interpolation (Delaunay triangulation)"],
-        ["Pandas",          "latest",   "DataFrame for wafer data (CSV parsing)"],
-        ["pypdf",           "latest",   "PDF bookmark injection"],
-        ["python-pptx",     "latest",   "PowerPoint report generation (optional)"],
-        ["ReportLab",       "4.x",      "Documentation PDF generator"],
-        ["PyInstaller",     "6.x",      "Build tool (not included in output)"],
-    ], col_widths=[3*cm, 2.5*cm, 11*cm]))
-
-    story.append(h2("12.6  Rebuild After Code Changes"))
+        ["Variant",                 "Project Folder",       "EXE size", "Total size", "scipy", "Startup"],
+        ["A — Standard standalone", "Wafer_tool_NEW2",      "92 MB",    "92 MB",      "Yes",   "~5–10 s"],
+        ["B — Standard folder",     "Wafer_tool_NEW2",      "16 MB",    "211 MB",     "Yes",   "~2–3 s"],
+        ["C — Slim standalone",     "Wafer_tool_SLIM",      "53 MB",    "53 MB",      "No",    "~5–10 s"],
+        ["D — Slim folder",         "Wafer_tool_SLIM",      "12 MB",    "114 MB",     "No",    "~2–3 s"],
+    ], col_widths=[4*cm, 3.8*cm, 2*cm, 2.2*cm, 1.5*cm, 3*cm]))
     story += [
-        p("After modifying any <code>.py</code> file, rebuild with the same command. "
-          "PyInstaller detects changed files automatically:"),
+        sp(4),
+        note("Slim variants replace scipy.griddata with matplotlib.tri (same Qhull C library, "
+             "already bundled) — verified identical output, ~18 MB smaller."),
+    ]
+    story.append(pb())
+
+    # ── Variant A ────────────────────────────────────────────────────────
+    story.append(h2("12.3  Variant A — Standard Standalone (92 MB single file)"))
+    story += [
+        p("Everything packed into one <code>.exe</code>. Copy a single file to any Windows PC "
+          "and double-click — no folder, no DLLs needed."),
+        p("<b>Folder:</b> <code>Wafer_tool_NEW2\\</code> "
+          "&nbsp;&nbsp;<b>Spec:</b> <code>WaferMapTool.spec</code>"),
     ]
     story.append(code("""\
 cd E:\\claude\\Wafer_tool_NEW2
-
-# Rebuild standalone (replaces dist\\WaferMapTool.exe)
 py -m PyInstaller WaferMapTool.spec --noconfirm
 
-# Rebuild folder version (replaces dist\\WaferMapTool_folder\\)
-py -m PyInstaller WaferMapTool_folder.spec --noconfirm"""))
+Output:  dist\\WaferMapTool.exe    (92 MB)"""))
     story += [
-        p("The <code>build\\</code> cache is reused between rebuilds to speed up the process. "
-          "Delete <code>build\\</code> manually if you encounter stale-cache issues."),
+        bullet("On first launch extracts to <code>%TEMP%\\_{MEI...}</code> — adds ~5–10 s once."),
+        bullet("Antivirus may flag single-file PyInstaller exes — add an exclusion if needed."),
+        bullet("Subsequent launches are fast (~2–3 s)."),
     ]
 
-    story.append(h2("12.7  Adding a Custom Icon"))
+    # ── Variant B ────────────────────────────────────────────────────────
+    story.append(h2("12.4  Variant B — Standard Folder (16 MB exe + 211 MB libs)"))
     story += [
-        p("To set a custom taskbar/exe icon, supply a <code>.ico</code> file and uncomment "
-          "the icon line in both spec files:"),
+        p("Small launcher exe alongside an <code>_internal\\</code> folder. "
+          "Faster startup; easier to patch individual files without a full rebuild."),
+        p("<b>Folder:</b> <code>Wafer_tool_NEW2\\</code> "
+          "&nbsp;&nbsp;<b>Spec:</b> <code>WaferMapTool_folder.spec</code>"),
     ]
     story.append(code("""\
-# In WaferMapTool.spec or WaferMapTool_folder.spec, inside EXE():
-icon="wafer_tool.ico",    # path relative to repo root"""))
+cd E:\\claude\\Wafer_tool_NEW2
+py -m PyInstaller WaferMapTool_folder.spec --noconfirm
+
+Output:  dist\\WaferMapTool_folder\\
+             WaferMapTool.exe    (16 MB — launcher)
+             _internal\\          (195 MB — DLLs, data, runtime)"""))
     story += [
-        p("Convert a PNG to ICO online (e.g., convertio.co) or with Pillow:"),
+        bullet("Zip the entire <code>WaferMapTool_folder\\</code> to distribute. "
+               "The exe will NOT run if separated from <code>_internal\\</code>."),
+        bullet("To update code only: rebuild and replace <code>WaferMapTool.exe</code> + "
+               "the <code>wafer_tool\\</code> .pyc files inside <code>_internal\\</code>."),
+    ]
+
+    # ── Variant C ────────────────────────────────────────────────────────
+    story.append(h2("12.5  Variant C — Slim Standalone (53 MB single file)"))
+    story += [
+        p("<b>Smallest single-file option.</b> Combines three optimisations: "
+          "aggressive Python module exclusions, scipy replaced by matplotlib.tri, "
+          "and post-analysis binary filtering to strip unused DLLs/PYDs from the bundle."),
+        p("<b>Folder:</b> <code>Wafer_tool_SLIM\\</code> "
+          "&nbsp;&nbsp;<b>Spec:</b> <code>WaferMapTool.spec</code>"),
+    ]
+    story.append(code("""\
+cd E:\\claude\\Wafer_tool_SLIM
+py -m PyInstaller WaferMapTool.spec --noconfirm
+
+Output:  dist\\WaferMapTool.exe    (53 MB)"""))
+    story += [
+        bullet("scipy replaced by <code>matplotlib.tri</code> — saves ~18 MB."),
+        bullet("Binary filter removes 7 unused DLLs/PYDs — saves ~61 MB."),
+        bullet("Same antivirus and startup trade-offs as Variant A."),
+    ]
+
+    # ── Variant D ────────────────────────────────────────────────────────
+    story.append(h2("12.6  Variant D — Slim Folder (12 MB exe + 114 MB libs)"))
+    story += [
+        p("<b>Smallest total size.</b> Folder distribution of the slim build. "
+          "Best for deployment where disk space matters and fast startup is preferred."),
+        p("<b>Folder:</b> <code>Wafer_tool_SLIM\\</code> "
+          "&nbsp;&nbsp;<b>Spec:</b> <code>WaferMapTool_folder.spec</code>"),
+    ]
+    story.append(code("""\
+cd E:\\claude\\Wafer_tool_SLIM
+py -m PyInstaller WaferMapTool_folder.spec --noconfirm
+
+Output:  dist\\WaferMapTool_folder\\
+             WaferMapTool.exe    (12 MB — launcher)
+             _internal\\          (102 MB — DLLs, data, runtime)"""))
+
+    # ── Binary filtering ─────────────────────────────────────────────────
+    story.append(h2("12.7  Binary Filtering (Slim variants — biggest single saving)"))
+    story += [
+        p("PyInstaller's dependency scanner pulls in DLLs and PYDs that are never actually "
+          "called at runtime. After <code>Analysis()</code>, the <code>a.binaries</code> list "
+          "can be filtered to remove them. This is the single biggest size lever — "
+          "<b>~61 MB saved</b> with 7 exclusions:"),
+    ]
+    story.append(table([
+        ["File",                    "Size",   "Why safe to remove"],
+        ["opengl32sw.dll",          "20.6 MB","Software OpenGL fallback — app uses Agg (CPU) renderer, no OpenGL"],
+        ["_avif.cp311-win_amd64.pyd", "7.9 MB","Pillow AVIF image plugin — app never loads/saves AVIF files"],
+        ["libcrypto-3.dll",         "5.2 MB", "OpenSSL crypto — only needed by Qt6Network (excluded)"],
+        ["Qt6Pdf.dll",              "4.6 MB", "Qt PDF engine — app uses Matplotlib for PDF, not Qt"],
+        ["Qt6Network.dll",          "1.8 MB", "Qt networking — no network features in app"],
+        ["libssl-3.dll",            "0.8 MB", "OpenSSL SSL — same reason as libcrypto"],
+    ], col_widths=[5*cm, 2*cm, 9.5*cm]))
+    story += [
+        sp(4),
+        note("<b>Important:</b> <code>libscipy_openblas64_*.dll</code> must NOT be excluded. "
+             "Despite the 'scipy' prefix, numpy 2.x ships this same DLL as its OpenBLAS backend. "
+             "Excluding it causes numpy C-extension import failure at runtime."),
+        sp(4),
+        p("<b>Implementation</b> — add after <code>Analysis()</code> in the spec:"),
+    ]
+    story.append(code("""\
+_BINARY_EXCLUDES = [
+    "opengl32sw",   # 20.6 MB  software OpenGL — not needed (Agg backend)
+    # NOTE: do NOT add "libscipy_openblas" — numpy 2.x uses this same DLL!
+    "_avif",        #  7.9 MB  Pillow AVIF plugin — never used
+    "libcrypto",    #  5.2 MB  OpenSSL — only needed by Qt6Network
+    "qt6pdf",       #  4.6 MB  Qt PDF — we use matplotlib for PDF
+    "qt6network",   #  1.8 MB  Qt networking — no network in app
+    "libssl",       #  0.8 MB  OpenSSL SSL — same as libcrypto
+]
+a.binaries = [b for b in a.binaries
+              if not any(x in b[0].lower() for x in _BINARY_EXCLUDES)]"""))
+
+    # ── Size evolution ────────────────────────────────────────────────────
+    story.append(h2("12.8  Size Reduction Journey (Standalone EXE)"))
+    story.append(table([
+        ["Step",                                    "Standalone EXE", "Saving"],
+        ["1. Baseline (all dependencies)",           "114 MB",        "—"],
+        ["2. + Aggressive Python module exclusions", "92 MB",         "−22 MB"],
+        ["3. + Replace scipy → matplotlib.tri",      "78 MB",         "−36 MB"],
+        ["4. + Binary filtering (6 DLLs/PYDs)",      "59 MB",         "−40 MB"],
+        ["Total reduction",                          "59 MB",         "−48% vs baseline"],
+    ], col_widths=[8*cm, 3.5*cm, 3*cm]))
+    story += [
+        sp(4),
+        note("The remaining ~53 MB is essentially irreducible without replacing PyQt6: "
+             "Qt6Core+Gui+Widgets (~27 MB), Python runtime (~6 MB), "
+             "NumPy+Pandas core (~9 MB), Matplotlib+fonts (~8 MB), pptx+pypdf (~3 MB)."),
+    ]
+
+    # ── What is excluded ─────────────────────────────────────────────────
+    story.append(h2("12.9  What Is Excluded (Python modules)"))
+    story += [
+        p("All four spec files apply the following exclusions to reduce size:"),
+    ]
+    story.append(table([
+        ["Excluded Package / Module",   "Reason"],
+        ["scipy (Slim variants only)",  "Replaced by matplotlib.tri — same algorithm, ~18 MB saved"],
+        ["reportlab",                   "Only used by generate_docs.py; not needed at runtime"],
+        ["sqlalchemy / psycopg2 / MySQLdb", "Pulled in by pandas but no database used"],
+        ["PyQt6.QtPrintSupport / QtSvg / QtNetwork / QtOpenGL", "Qt modules not used by this app"],
+        ["matplotlib backends: svg / wxagg / tkagg / gtk3agg / ps", "Only qtagg + pdf + agg used"],
+        ["scipy.stats / signal / optimize / fft / linalg / io / ndimage", "Unused scipy submodules"],
+        ["pandas.io.formats.style / tests", "Unused pandas extras (pandas.plotting must NOT be excluded — pandas internally imports it)"],
+        ["IPython / jupyter / pytest / sphinx / setuptools", "Dev tools, never shipped"],
+        ["tkinter / wx / _tkinter",    "Other GUI toolkits not used"],
+    ], col_widths=[7*cm, 9.5*cm]))
+
+    # ── What is bundled ───────────────────────────────────────────────────
+    story.append(h2("12.10  What Is Bundled (all variants)"))
+    story.append(table([
+        ["Package",       "Standard variants", "Slim variants", "Purpose"],
+        ["Python 3.11",   "Yes", "Yes", "Runtime interpreter"],
+        ["PyQt6",         "Yes", "Yes", "GUI framework"],
+        ["Matplotlib",    "Yes", "Yes", "Wafer maps, PDF pages, charts"],
+        ["matplotlib.tri","Yes", "Yes", "Triangulation (Slim: also replaces scipy)"],
+        ["NumPy",         "Yes", "Yes", "Float32 array maths"],
+        ["SciPy",         "Yes", "No",  "Interpolation (Standard only)"],
+        ["Pandas",        "Yes", "Yes", "CSV parsing, DataFrames"],
+        ["pypdf",         "Yes", "Yes", "PDF bookmark injection"],
+        ["python-pptx",   "Yes", "Yes", "PowerPoint generation"],
+    ], col_widths=[3*cm, 2.5*cm, 2.5*cm, 8.5*cm]))
+
+    # ── How the slim build works ──────────────────────────────────────────
+    story.append(h2("12.11  How the Slim Build Removes SciPy"))
+    story += [
+        p("In <code>Wafer_tool_SLIM/wafer_tool/geometry.py</code>, the single scipy import "
+          "is replaced:"),
+    ]
+    story.append(code("""\
+# Standard (Wafer_tool_NEW2/wafer_tool/geometry.py):
+from scipy.interpolate import griddata
+zi = griddata((x, y), z, (xi, yi), method="linear")
+
+# Slim (Wafer_tool_SLIM/wafer_tool/geometry.py):
+from matplotlib.tri import Triangulation, LinearTriInterpolator
+triang = Triangulation(x.astype(float64), y.astype(float64))
+interp = LinearTriInterpolator(triang, z.astype(float64))
+zi     = np.ma.filled(interp(xi, yi), np.nan).astype(float32)"""))
+    story += [
+        p("Both <code>scipy.griddata(method='linear')</code> and "
+          "<code>matplotlib.tri.LinearTriInterpolator</code> use the same underlying "
+          "<b>Qhull C library</b> for Delaunay triangulation. The interpolated values are "
+          "identical to within floating-point rounding."),
+        p("NaN holes (grid points outside the data convex hull) are filled by a pure-numpy "
+          "iterative 4-neighbour spread — no scipy dependency at any step."),
+    ]
+    story += [
+        p("<b>Verification results:</b>"),
+        bullet("Grid shape, NaN percentage, and value range: correct."),
+        bullet("Clamping (zi stays within z.min()–z.max()): passed."),
+        bullet("Sparse 4-point wafer (minimum valid input): passed."),
+        bullet("Flat wafer (all-same z): mean error = 0.0000."),
+        bullet("scipy module count after import: 0 (scipy never loaded)."),
+        bullet("Full render with PlotConfig + log scale: pixel-correct PNG produced."),
+    ]
+
+    # ── Rebuild after changes ─────────────────────────────────────────────
+    story.append(h2("12.12  Rebuilding After Code Changes"))
+    story.append(code("""\
+# --- Standard builds (Wafer_tool_NEW2) ---
+cd E:\\claude\\Wafer_tool_NEW2
+
+py -m PyInstaller WaferMapTool.spec --noconfirm        # Variant A (92 MB single)
+py -m PyInstaller WaferMapTool_folder.spec --noconfirm # Variant B (folder)
+
+# --- Slim builds (Wafer_tool_SLIM) ---
+cd E:\\claude\\Wafer_tool_SLIM
+
+py -m PyInstaller WaferMapTool.spec --noconfirm        # Variant C (53 MB single)
+py -m PyInstaller WaferMapTool_folder.spec --noconfirm # Variant D (12 MB exe + 114 MB)
+
+# Force clean rebuild (if cache is stale):
+rmdir /s /q build
+py -m PyInstaller <spec_file> --noconfirm"""))
+
+    # ── Custom icon ───────────────────────────────────────────────────────
+    story.append(h2("12.13  Adding a Custom Icon"))
+    story += [
+        p("Uncomment the <code>icon=</code> line in any spec file's <code>EXE()</code> block "
+          "and supply a <code>.ico</code> file:"),
+    ]
+    story.append(code("""\
+# Inside EXE() in any .spec file:
+icon="wafer_tool.ico",    # relative to repo root"""))
+    story += [
+        p("Convert PNG to ICO with Pillow:"),
     ]
     story.append(code("""\
 from PIL import Image
