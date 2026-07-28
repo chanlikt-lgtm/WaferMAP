@@ -19,7 +19,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from .config import PlotConfig
+from .config import PlotConfig, PAGE_PNG_DPI
 
 __all__ = [
     "CONDITION_DISPLAY_ORDER",
@@ -174,7 +174,7 @@ def create_8_condition_summary_page(
     )
 
     if save_png_path:
-        fig.savefig(save_png_path, bbox_inches="tight", dpi=150)
+        fig.savefig(save_png_path, bbox_inches="tight", dpi=PAGE_PNG_DPI)
 
     pdf.savefig(fig)
     plt.close(fig)

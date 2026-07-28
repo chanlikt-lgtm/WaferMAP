@@ -31,7 +31,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.patches import Patch
 from pypdf import PdfReader, PdfWriter
 
-from ..config import PlotConfig, MAX_WAFERS_PER_PAGE, LINES_PER_SUMMARY_PAGE
+from ..config import PlotConfig, MAX_WAFERS_PER_PAGE, LINES_PER_SUMMARY_PAGE, PAGE_PNG_DPI
 from ..plotting import draw_wafer_ax
 from ..statistics import ConditionCounts, create_8_condition_summary_page
 
@@ -67,7 +67,7 @@ def _render_grid_page(job: tuple) -> int:
         with _PdfPages(page_pdf_path) as pp:
             pp.savefig(fig)
         if page_png_path:
-            fig.savefig(page_png_path, bbox_inches="tight", dpi=150)
+            fig.savefig(page_png_path, bbox_inches="tight", dpi=PAGE_PNG_DPI)
     finally:
         _plt.close(fig)
     return grid_seq
@@ -221,7 +221,7 @@ def _write_summary_text(
             page_png_dir, display_counter, f"summary_report_page_{display_counter}"
         )
         if page_png_path:
-            fig.savefig(page_png_path, bbox_inches="tight", dpi=150)
+            fig.savefig(page_png_path, bbox_inches="tight", dpi=PAGE_PNG_DPI)
         plt.close(fig)
         display_counter += 1
         pdf_page_idx    += 1

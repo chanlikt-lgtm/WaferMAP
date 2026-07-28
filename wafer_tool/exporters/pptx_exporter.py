@@ -1,7 +1,7 @@
 """
 exporters/pptx_exporter.py
 ==========================
-Generates a PowerPoint report from pre-rendered wafer PNG images.
+Generates a PowerPoint report from ordered PNG snapshots of the PDF pages.
 
 Gracefully degrades: if python-pptx is not installed, HAS_PPTX is False
 and create_powerpoint_report raises ImportError with install instructions.
@@ -16,17 +16,17 @@ Template resolution order
 Public API
 ----------
 HAS_PPTX : bool
-create_powerpoint_report(png_dir, pptx_path, title_text, summary_imgs)
+create_powerpoint_report(page_png_dir, pptx_path, title_text)
 """
 from __future__ import annotations
 
 import os
+import re
 import sys
 
 try:
     from pptx import Presentation
     from pptx.util import Pt
-    from pptx.enum.text import PP_ALIGN
     HAS_PPTX = True
 except ImportError:
     HAS_PPTX = False
@@ -37,21 +37,18 @@ TEMPLATE_FILENAME = "Infineon Default Theme.pptx"
 
 
 def create_powerpoint_report(
-    png_dir:      str,
-    pptx_path:    str,
-    title_text:   str,
-    summary_imgs: list[tuple[str, str]] | None = None,
+    page_png_dir: str,
+    pptx_path: str,
+    title_text: str,
 ) -> None:
     """
-    Compile wafer PNG images (and optional summary charts) into a .pptx file.
+    Compile ordered PNG snapshots of PDF-style report pages into a .pptx file.
 
     Parameters
     ----------
-    png_dir      : Directory containing individual wafer PNG files (sorted alphabetically).
+    page_png_dir : Directory containing ordered report-page PNG files.
     pptx_path    : Destination path for the generated PowerPoint file.
     title_text   : Text displayed on the title slide.
-    summary_imgs : Optional list of (slide_title, image_path) for summary slides
-                   inserted after the title slide and before individual wafers.
 
     Raises
     ------
@@ -72,24 +69,24 @@ def create_powerpoint_report(
     if title_slide.shapes.title:
         title_slide.shapes.title.text = title_text
 
-    # ── Summary slides ────────────────────────────────────────────────────
-    for img_title, img_path in (summary_imgs or []):
-        if not os.path.exists(img_path):
-            print(f"⚠  Summary image not found, skipped: {img_path}")
-            continue
-        slide = prs.slides.add_slide(content_layout)
-        _set_title(slide, img_title)
-        slide.shapes.add_picture(img_path, Pt(100), Pt(70), width=Pt(500))
+    # ── Report page slides ────────────────────────────────────────────────
+    # Sort by the LEADING PAGE NUMBER numerically, not lexicographically: the
+    # page-image names are zero-padded to only 3 digits, so a plain string sort
+    # puts "1000_..." before "100_..." and "999_..." — scrambling every slide
+    # past page 999 (e.g. a 2000+ page report from a large multi-lot file).
+    def _page_order(fname: str):
+        m = re.match(r"(\d+)", fname)
+        return (int(m.group(1)) if m else 1 << 30, fname)
 
-    # ── Individual wafer slides ───────────────────────────────────────────
     png_files = sorted(
-        f for f in os.listdir(png_dir) if f.lower().endswith(".png")
+        (f for f in os.listdir(page_png_dir) if f.lower().endswith(".png")),
+        key=_page_order,
     )
     for filename in png_files:
-        img_path = os.path.join(png_dir, filename)
+        img_path = os.path.join(page_png_dir, filename)
         slide = prs.slides.add_slide(content_layout)
-        _set_title(slide, os.path.splitext(filename)[0])
-        slide.shapes.add_picture(img_path, Pt(100), Pt(100))
+        _set_slide_title(slide, _slide_title_from_filename(filename))
+        _add_report_page(slide, prs, img_path)
 
     import gc; gc.collect()   # free any lingering PNG buffers before writing
     prs.save(pptx_path)
@@ -127,22 +124,58 @@ def _load_presentation() -> "Presentation":
 
 
 def _content_slide_layout(prs: "Presentation"):
-    """Return layout index 5 (blank with title) or the last available layout."""
+    """Return a layout with a title placeholder when available."""
     try:
         return prs.slide_layouts[5]
     except IndexError:
         return prs.slide_layouts[-1]
 
 
-def _set_title(slide, text: str) -> None:
-    """Format the slide title with Arial 24 pt bold left-aligned."""
-    shape = slide.shapes.title
-    if shape is None:
+def _add_report_page(slide, prs: "Presentation", img_path: str) -> None:
+    """Place a PDF-style page snapshot below the slide title with small margins."""
+    margin = Pt(10)
+    title_bottom = _title_bottom(slide)
+    top = max(title_bottom + Pt(6), margin)
+    picture = slide.shapes.add_picture(img_path, 0, 0, height=prs.slide_height - top - margin)
+    picture.left = int((prs.slide_width - picture.width) / 2)
+    picture.top = int(top)
+
+
+def _set_slide_title(slide, text: str) -> None:
+    """Populate the slide title so PowerPoint outline view can display it."""
+    if slide.shapes.title is not None:
+        slide.shapes.title.text = text
         return
-    shape.text = text
-    for para in shape.text_frame.paragraphs:
-        para.alignment = PP_ALIGN.LEFT
-        for run in para.runs:
-            run.font.name = "Arial"
-            run.font.size = Pt(24)
-            run.font.bold = True
+
+    textbox = slide.shapes.add_textbox(Pt(20), Pt(10), Pt(700), Pt(30))
+    textbox.text_frame.text = text
+
+
+def _title_bottom(slide) -> int:
+    if slide.shapes.title is None:
+        return 0
+    return slide.shapes.title.top + slide.shapes.title.height
+
+
+def _slide_title_from_filename(filename: str) -> str:
+    stem = os.path.splitext(filename)[0]
+    stem = re.sub(r"^\d+_", "", stem)
+
+    if stem.startswith("summary_report"):
+        match = re.search(r"page_(\d+)$", stem)
+        if match and match.group(1) != "1":
+            return f"Summary Report ({match.group(1)})"
+        return "Summary Report"
+
+    if stem == "8_condition_distribution":
+        return "8-Condition Distribution"
+
+    match = re.match(r"lot_(.+?)_page_(\d+)$", stem)
+    if match:
+        lot_id, page_num = match.groups()
+        lot_title = f"Lot ID: {lot_id}"
+        if page_num != "1":
+            return f"{lot_title} ({page_num})"
+        return lot_title
+
+    return stem.replace("_", " ").title()

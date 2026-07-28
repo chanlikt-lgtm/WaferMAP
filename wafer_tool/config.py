@@ -24,6 +24,11 @@ WAFER_RADIUS_FACTOR: float = 1.05  # expand radius slightly beyond data extents
 MIN_POINTS_FOR_PLOT: int  = 4   # minimum die points needed to attempt a plot
 MAX_WAFERS_PER_PAGE: int  = 25  # 5×5 grid on each PDF page
 LINES_PER_SUMMARY_PAGE: int = 55
+# DPI for the per-page PNG snapshots that become PowerPoint slides. These feed
+# ONLY the PPTX (the PDF itself is vector), so this trades slide-image sharpness
+# for deck size: at 110 a big multi-thousand-slide deck is roughly half the
+# bytes of 150 and assembles faster, while still looking crisp on screen.
+PAGE_PNG_DPI: int = 110
 
 
 # ---------------------------------------------------------------------------
