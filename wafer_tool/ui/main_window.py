@@ -31,7 +31,7 @@ from PyQt6.QtGui     import (
     QPixmap, QPainter, QBrush, QPen, QColor, QFont
 )
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QFileDialog,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QRadioButton, QButtonGroup,
     QSizePolicy, QSpacerItem, QSplitter, QStatusBar,
@@ -41,6 +41,9 @@ from PyQt6.QtWidgets import (
 from wafer_tool.config import PlotConfig
 from wafer_tool.data_loader import read_wafer_data
 from ..worker import ReportWorker
+from ..eff_loader import scan_eff, EffScanError
+from ..eff_worker import EffReportWorker, EffPreviewWorker
+from .eff_param_dialog import EffParameterDialog
 from .histogram_widget import HistogramWidget
 
 
@@ -744,7 +747,15 @@ class DataProcessorUI(QMainWindow):
         self.setMinimumSize(1100, 760)
         self.setStyleSheet(_STYLESHEET)
 
-        self._worker: Optional[ReportWorker] = None
+        self._worker = None
+        # EFF-mode state: set when the loaded file is a raw .eff extraction.
+        self._eff_mode = False
+        self._eff_scan = None
+        self._eff_indices: list[int] = []
+        self._eff_selected: list[str] = []
+        self._preview_worker = None   # background EFF single-parameter preview
+        self._eff_preview_pos = 0     # which selected parameter is previewed
+        self._preview_cache: dict[int, object] = {}  # param col index -> DataFrame
         self._wafer_count  = 0
         self._total_wafers = 0
         self._loaded_values: np.ndarray | None = None  # value column only; full df freed after load
@@ -818,14 +829,21 @@ class DataProcessorUI(QMainWindow):
 
     def _grp_thresh(self) -> QGroupBox:
         b = QGroupBox("Parameters"); g = QGridLayout(b); g.setSpacing(6)
+        # Shows which EFF parameter these limits belong to (hidden for txt/csv).
+        self._param_name_lbl = QLabel("")
+        self._param_name_lbl.setWordWrap(True)
+        self._param_name_lbl.setStyleSheet(
+            f"color:{_ACCENT};font-size:11px;font-weight:700;")
+        self._param_name_lbl.setVisible(False)
         self.t_low_edit  = SciLineEdit(default=-90.0)
         self.t_high_edit = SciLineEdit(default=-60.0)
         self.t_low_edit.editingFinished.connect(self._refresh_charts)
         self.t_high_edit.editingFinished.connect(self._refresh_charts)
-        g.addWidget(_L("Limit 1 (Threshold 1):"), 0, 0)
-        g.addWidget(self.t_low_edit,               0, 1)
-        g.addWidget(_L("Limit 2 (Threshold 2):"), 1, 0)
-        g.addWidget(self.t_high_edit,              1, 1)
+        g.addWidget(self._param_name_lbl,          0, 0, 1, 2)
+        g.addWidget(_L("Limit 1 (Threshold 1):"), 1, 0)
+        g.addWidget(self.t_low_edit,               1, 1)
+        g.addWidget(_L("Limit 2 (Threshold 2):"), 2, 0)
+        g.addWidget(self.t_high_edit,              2, 1)
         return b
 
     def _grp_opts(self) -> QGroupBox:
@@ -908,6 +926,29 @@ class DataProcessorUI(QMainWindow):
         v.addLayout(auto_row)
         return w
 
+    def _build_eff_preview_bar(self) -> QWidget:
+        """Selector to page through each selected EFF parameter's scatter /
+        histogram preview. Hidden entirely for txt/csv files."""
+        bar = QGroupBox("EFF Parameter Preview")
+        row = QHBoxLayout(bar); row.setContentsMargins(8, 4, 8, 4); row.setSpacing(6)
+        self._eff_prev_btn = QPushButton("◀ Prev")
+        self._eff_prev_btn.setObjectName("toggle_btn"); self._eff_prev_btn.setFixedWidth(80)
+        self._eff_prev_btn.clicked.connect(lambda: self._eff_preview_step(-1))
+        self._eff_param_combo = QComboBox()
+        self._eff_param_combo.currentIndexChanged.connect(self._eff_preview_combo_changed)
+        self._eff_next_btn = QPushButton("Next ▶")
+        self._eff_next_btn.setObjectName("toggle_btn"); self._eff_next_btn.setFixedWidth(80)
+        self._eff_next_btn.clicked.connect(lambda: self._eff_preview_step(+1))
+        self._eff_preview_status = QLabel("")
+        self._eff_preview_status.setStyleSheet(f"color:{_MUTED};font-size:11px;")
+        row.addWidget(self._eff_prev_btn)
+        row.addWidget(self._eff_param_combo, stretch=1)
+        row.addWidget(self._eff_next_btn)
+        row.addWidget(self._eff_preview_status)
+        self._eff_preview_bar = bar
+        bar.setVisible(False)
+        return bar
+
     # ── RIGHT panel ───────────────────────────────────────────────────────
 
     def _build_right(self) -> QWidget:
@@ -923,6 +964,9 @@ class DataProcessorUI(QMainWindow):
         self._theme_btn.clicked.connect(self._toggle_theme)
         theme_row.addWidget(self._theme_btn)
         v.addLayout(theme_row)
+
+        # ── EFF per-parameter preview selector (hidden unless in EFF mode) ──
+        v.addWidget(self._build_eff_preview_bar())
 
         # Tab widget — ALWAYS fully interactive, never disabled
         self.tabs = QTabWidget()
@@ -1025,10 +1069,195 @@ class DataProcessorUI(QMainWindow):
     def _browse_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Select data file", "",
-            "Data files (*.csv *.txt *.dat);;All files (*)"
+            "Wafer data (*.eff *.csv *.txt *.dat);;EFF extraction (*.eff);;"
+            "Text / CSV (*.csv *.txt *.dat);;All files (*)"
         )
         if not path: return
-        self.file_edit.setText(path); self._load_preview(path)
+        if path.lower().endswith(".eff"):
+            self._handle_eff_pick(path)
+        else:
+            self._eff_mode = False
+            self._eff_scan = None
+            self._eff_indices = []
+            self._eff_selected = []
+            self._cancel_preview_worker()
+            self._preview_cache.clear()
+            if hasattr(self, "_eff_preview_bar"):
+                self._eff_preview_bar.setVisible(False)
+            self._param_name_lbl.setVisible(False)
+            if self.pattern_edit.text().strip() == "*.eff":
+                self.pattern_edit.setText("*.txt")
+            self.file_edit.setText(path)
+            self._load_preview(path)
+
+    def _handle_eff_pick(self, path: str) -> None:
+        """Scan a raw .eff file and let the user pick which parameters to map.
+
+        Lot/Wafer/X/Y are auto-detected coordinates; the user chooses one or
+        more measurement parameters, and each becomes its own output folder.
+        """
+        try:
+            scan = scan_eff(path)
+        except EffScanError as exc:
+            self._file_info.setText(f"⚠  {exc}")
+            self._file_info.setStyleSheet(f"color:{_RED};font-size:11px;")
+            self._status(f"⚠  {exc}", _RED)
+            return
+        except Exception as exc:  # noqa: BLE001 — surface any read failure
+            self._file_info.setText(f"⚠  Could not read EFF: {exc}")
+            self._file_info.setStyleSheet(f"color:{_RED};font-size:11px;")
+            return
+
+        dlg = EffParameterDialog(scan, self, preselected=self._eff_selected or None)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            self._status("EFF parameter selection cancelled.", _YELLOW)
+            return
+
+        self._eff_mode    = True
+        self._eff_scan    = scan
+        self._eff_indices = dlg.selected_indices()
+        self._eff_selected = dlg.selected_names()
+        self.file_edit.setText(path)
+        # Folder-mode scheduled EFF jobs should match .eff drops, not .txt.
+        self.pattern_edit.setText("*.eff")
+
+        rows_txt = f"~{scan.declared_rows:,} rows" if scan.declared_rows else "rows"
+        self._file_info.setText(
+            f"✓  EFF · {rows_txt} · {len(self._eff_indices)} of "
+            f"{len(scan.parameters)} parameter(s) selected — "
+            f"each becomes its own output folder."
+        )
+        self._file_info.setStyleSheet(f"color:{_GREEN};font-size:12px;font-weight:600;")
+
+        # Set up the per-parameter preview: page through each selected
+        # parameter's scatter / histogram with ◀ Prev / Next ▶.
+        self._preview_cache.clear()
+        self._eff_preview_pos = 0
+        self._loaded_values = None
+        self._loaded_wafer_codes = None
+        self._loaded_wafer_names = None
+        self._scatter_canvas._show_placeholder()
+
+        self._eff_param_combo.blockSignals(True)
+        self._eff_param_combo.clear()
+        for i, name in enumerate(self._eff_selected):
+            self._eff_param_combo.addItem(f"{i + 1}/{len(self._eff_selected)}  {name}")
+        self._eff_param_combo.setCurrentIndex(0)
+        self._eff_param_combo.blockSignals(False)
+        multi = len(self._eff_selected) > 1
+        self._eff_prev_btn.setEnabled(multi)
+        self._eff_next_btn.setEnabled(multi)
+        self._eff_preview_bar.setVisible(True)
+
+        self._status(
+            f"EFF ready — {len(self._eff_indices)} parameter(s). "
+            f"Set thresholds & output folder, then press Generate Report.",
+            _GREEN,
+        )
+        # Kick off the first parameter's preview (background — never blocks UI).
+        self._eff_preview_goto(0)
+
+    # ── EFF per-parameter preview navigation ─────────────────────────────────
+
+    def _cancel_preview_worker(self) -> None:
+        if self._preview_worker is not None:
+            try:
+                self._preview_worker.ready.disconnect()
+                self._preview_worker.failed.disconnect()
+            except (RuntimeError, TypeError):
+                pass
+            self._preview_worker.cancel()
+            self._preview_worker.finished.connect(self._preview_worker.deleteLater)
+            self._preview_worker = None
+
+    def _eff_preview_step(self, delta: int) -> None:
+        """◀ Prev / Next ▶ — wrap around the selected parameters."""
+        if not self._eff_selected:
+            return
+        n = len(self._eff_selected)
+        self._eff_preview_goto((self._eff_preview_pos + delta) % n)
+
+    def _eff_preview_combo_changed(self, index: int) -> None:
+        if index >= 0 and index != self._eff_preview_pos:
+            self._eff_preview_goto(index)
+
+    def _apply_param_limits(self, pos: int) -> None:
+        """Set Limit 1 / Limit 2 to the pos-th parameter's EFF spec limits.
+
+        Only overwrites a field when that limit exists in the file, so a
+        parameter without spec limits keeps whatever is currently entered.
+        """
+        name = self._eff_selected[pos]
+        param = (self._eff_scan.parameter_by_index(self._eff_indices[pos])
+                 if self._eff_scan else None)
+        lower = param.limit_lower if param else None
+        upper = param.limit_upper if param else None
+
+        if lower is not None:
+            self.t_low_edit.setText(f"{lower:g}")
+        if upper is not None:
+            self.t_high_edit.setText(f"{upper:g}")
+
+        if lower is not None or upper is not None:
+            note = "spec limits applied"
+            if lower is None or upper is None:
+                note = "1 spec limit applied — check the other"
+            suffix = f"  ·  {note}"
+        else:
+            suffix = "  ·  no spec limits in file — keeping current values"
+        self._param_name_lbl.setText(f"Parameter:  {name}{suffix}")
+        self._param_name_lbl.setVisible(True)
+
+    def _eff_preview_goto(self, pos: int) -> None:
+        """Show the scatter / histogram for the pos-th selected parameter."""
+        if not self._eff_mode or not self._eff_selected:
+            return
+        pos = max(0, min(pos, len(self._eff_selected) - 1))
+        self._eff_preview_pos = pos
+        self._eff_param_combo.blockSignals(True)
+        self._eff_param_combo.setCurrentIndex(pos)
+        self._eff_param_combo.blockSignals(False)
+
+        name = self._eff_selected[pos]
+        col_index = self._eff_indices[pos]
+
+        # Refresh the threshold limits to this parameter's spec limits.
+        self._apply_param_limits(pos)
+
+        cached = self._preview_cache.get(col_index)
+        if cached is not None:                         # instant — no re-read
+            n_pts, n_w = self._apply_preview_df(cached)
+            self._eff_preview_status.setText(f"{name}: {n_pts:,} pts · {n_w} wafers")
+            return
+
+        # Not cached: read this parameter in the background.
+        self._cancel_preview_worker()
+        self._scatter_canvas._show_placeholder()
+        self._loaded_values = None
+        self._eff_preview_status.setText(f"loading {name}…")
+        worker = EffPreviewWorker(self._eff_scan.path, col_index, name, scan=self._eff_scan)
+        worker.ready.connect(self._on_eff_preview_ready)
+        worker.failed.connect(self._on_eff_preview_failed)
+        self._preview_worker = worker
+        worker.start()
+
+    def _on_eff_preview_ready(self, df, col_index: int) -> None:
+        if col_index not in self._eff_indices:
+            return
+        self._preview_cache[col_index] = df            # cache even if paged away
+        pos = self._eff_indices.index(col_index)
+        if pos != self._eff_preview_pos:
+            return                                     # stale — user moved on
+        name = self._eff_selected[pos]
+        if df is None or len(df) == 0:
+            self._scatter_canvas._show_placeholder()
+            self._eff_preview_status.setText(f"{name}: no data points")
+            return
+        n_pts, n_w = self._apply_preview_df(df)
+        self._eff_preview_status.setText(f"{name}: {n_pts:,} pts · {n_w} wafers")
+
+    def _on_eff_preview_failed(self, msg: str) -> None:
+        self._eff_preview_status.setText(f"preview failed: {msg}")
 
     def _load_preview(self, path: str) -> None:
         try:
@@ -1040,6 +1269,16 @@ class DataProcessorUI(QMainWindow):
             self._loaded_wafer_codes = None
             self._loaded_wafer_names = None
             return
+        n_pts, n_w = self._apply_preview_df(df)
+        self._file_info.setText(f"✓  {n_pts:,} die points · {n_w} wafers")
+        self._file_info.setStyleSheet(f"color:{_GREEN};font-size:13px;font-weight:700;")
+
+    def _apply_preview_df(self, df) -> tuple[int, int]:
+        """Load a lot/wafer/x/y/value DataFrame into the scatter + histogram.
+
+        Shared by the txt/csv preview and the per-parameter EFF preview. Returns
+        ``(n_points, n_wafers)``.
+        """
         n_w = df.groupby(["lot", "wafer"]).ngroups
         self._total_wafers = n_w
         z = df["value"].to_numpy(dtype=np.float32, copy=False)  # view into df's buffer
@@ -1050,11 +1289,10 @@ class DataProcessorUI(QMainWindow):
         # beyond #32767 plotted off-screen (dense block on the left, empty right).
         self._loaded_wafer_codes = wafer_cat.cat.codes.to_numpy(dtype=np.int32, copy=True)
         self._loaded_wafer_names = list(wafer_cat.cat.categories)
-        del df, wafer_cat                                    # frees x/y columns; z keeps value alive
+        del wafer_cat                                        # frees label temp; z keeps value alive
         self._loaded_values = z
-        self._file_info.setText(f"✓  {len(z):,} die points · {n_w} wafers")
-        self._file_info.setStyleSheet(f"color:{_GREEN};font-size:13px;font-weight:700;")
         self._refresh_charts()
+        return len(z), n_w
 
     def _refresh_charts(self) -> None:
         if self._loaded_values is None: return
@@ -1118,17 +1356,24 @@ class DataProcessorUI(QMainWindow):
         if t_low == t_high:
             self._status("⚠  Limit 1 and Limit 2 must differ.", _RED); return None
         rot_deg = [0, 90, 180, 270][self._rot_group.checkedId()]
+        # Raw-EFF jobs carry the selected parameter names; an empty list would
+        # mean "all parameters", so require an explicit selection here.
+        eff_params = list(self._eff_selected) if self._eff_mode else []
+        if self._eff_mode and not eff_params:
+            self._status("⚠  Select at least one EFF parameter first.", _RED); return None
         # Folder mode: record the file's folder + pattern so each scheduled run
         # picks the newest matching file instead of this exact one.
-        input_dir, pattern = "", "*.txt"
+        default_pattern = "*.eff" if self._eff_mode else "*.txt"
+        input_dir, pattern = "", default_pattern
         if self.newest_chk.isChecked():
             input_dir = os.path.dirname(fp)
-            pattern = self.pattern_edit.text().strip() or "*.txt"
+            pattern = self.pattern_edit.text().strip() or default_pattern
         return WaferJob(
             input_file=fp, out_dir=out, t_low=t_low, t_high=t_high,
             use_log=self.log_chk.isChecked(), high_is_green=self.hig_chk.isChecked(),
             mirror_x=self.mirx_chk.isChecked(), mirror_y=self.miry_chk.isChecked(),
             rot_deg=rot_deg, input_dir=input_dir, input_pattern=pattern,
+            eff_params=eff_params,
         )
 
     def _save_job(self) -> None:
@@ -1143,9 +1388,12 @@ class DataProcessorUI(QMainWindow):
             return
         saved = save_job(path, job)
         self._status(f"Saved job: {os.path.basename(saved)}", _GREEN)
+        eff_note = (
+            f"\n\nEFF job — maps {len(job.eff_params)} parameter(s), "
+            f"one output folder each." if job.eff_params else "")
         ret = QMessageBox.question(
             self, "Job Saved",
-            f"Saved {os.path.basename(saved)}.\n\nRuns offline with:\n"
+            f"Saved {os.path.basename(saved)}.{eff_note}\n\nRuns offline with:\n"
             f"python run_job.py \"{saved}\"\n\nOpen the scheduler to run it automatically?")
         if ret == QMessageBox.StandardButton.Yes:
             from wafer_tool.automation.scheduler_dialog import SchedulerDialog
@@ -1156,6 +1404,8 @@ class DataProcessorUI(QMainWindow):
         SchedulerDialog(self).exec()
 
     def _run(self) -> None:
+        if self._eff_mode:
+            return self._run_eff()
         fp  = self.file_edit.text().strip()
         out = self.out_edit.text().strip()
         if not fp or not os.path.isfile(fp):
@@ -1208,17 +1458,75 @@ class DataProcessorUI(QMainWindow):
         self._worker.error.connect(self._on_err)
         self._worker.start()
 
+    def _run_eff(self) -> None:
+        """Generate a wafer-map report per selected parameter of an .eff file."""
+        out = self.out_edit.text().strip()
+        if not self._eff_scan or not self._eff_indices:
+            return self._status("⚠  Pick an EFF file and at least one parameter.", _RED)
+        if not out:
+            return self._status("⚠  Select an output directory.", _RED)
+        if not self.t_low_edit.is_valid() or not self.t_high_edit.is_valid():
+            return self._status("⚠  Invalid threshold value.", _RED)
+        t_low, t_high = self.t_low_edit.value(), self.t_high_edit.value()
+        if t_low == t_high:
+            return self._status("⚠  Limit 1 and Limit 2 must differ.", _RED)
+        os.makedirs(out, exist_ok=True)
+        rot_deg = [0, 90, 180, 270][self._rot_group.checkedId()]
+        try:
+            config = PlotConfig(
+                t_low=t_low, t_high=t_high,
+                use_log=self.log_chk.isChecked(),
+                high_is_green=self.hig_chk.isChecked(),
+                mirror_x=self.mirx_chk.isChecked(),
+                mirror_y=self.miry_chk.isChecked(),
+                rot_deg=rot_deg,
+            )
+        except ValueError as exc:
+            return self._status(f"⚠  {exc}", _RED)
+
+        # Reset state — same as the txt path
+        self._wafer_count  = 0
+        self._current_lot  = None
+        self._plot_paused  = False
+        self._pause_btn.setText("⏸  Pause Preview")
+        self._wafer_grid.reset()
+        self._grid_label.setText("Reading EFF and splitting parameters…")
+        self.wafer_bar.setValue(0);   self.wafer_bar.setFormat("%p%  (wafer render)")
+        self.overall_bar.setValue(0); self.overall_bar.setFormat("%p%  (pipeline)")
+        n = len(self._eff_indices)
+        self._status(f"Starting EFF — {n} parameter(s)…", _YELLOW)
+        self.run_btn.setEnabled(False); self.cancel_btn.setEnabled(True)
+        self.open_btn.setEnabled(False)
+        self.tabs.setCurrentIndex(0)
+
+        if self._worker is not None:
+            self._worker.deleteLater()
+            self._worker = None
+        self._worker = EffReportWorker(
+            self._eff_scan.path, self._eff_indices, config, out,
+            scan=self._eff_scan,
+        )
+        self._worker.progress.connect(self.overall_bar.setValue)
+        self._worker.wafer_progress.connect(self.wafer_bar.setValue)
+        self._worker.status_message.connect(self._on_msg)
+        self._worker.wafer_ready.connect(self._on_wafer)
+        self._worker.all_done.connect(self._on_eff_all_done)
+        self._worker.error.connect(self._on_err)
+        self._worker.start()
+
     def _cancel(self) -> None:
         if not (self._worker and self._worker.isRunning()):
             return
-        # Disconnect signals immediately so late emissions don't confuse the UI
-        try:
-            self._worker.report_done.disconnect(self._on_done)
-            self._worker.error.disconnect(self._on_err)
-            self._worker.status_message.disconnect(self._on_msg)
-            self._worker.wafer_ready.disconnect(self._on_wafer)
-        except RuntimeError:
-            pass
+        # Disconnect signals immediately so late emissions don't confuse the UI.
+        # Both worker types are handled — disconnect only signals that exist.
+        for sig_name in ("report_done", "all_done", "error",
+                         "status_message", "wafer_ready"):
+            sig = getattr(self._worker, sig_name, None)
+            if sig is not None:
+                try:
+                    sig.disconnect()
+                except (RuntimeError, TypeError):
+                    pass
         # Wire QThread.finished (now accessible since we renamed our signal)
         # so the dying thread auto-deletes once its run() returns.
         self._worker.finished.connect(self._worker.deleteLater)
@@ -1270,6 +1578,26 @@ class DataProcessorUI(QMainWindow):
         self.out_path_lbl.setText(self.out_edit.text().strip())
         self.open_btn.setEnabled(True); self._reset()
         import gc; gc.collect()  # free matplotlib figure cache from render loop
+
+    def _on_eff_all_done(self, results: list) -> None:
+        """Completion slot for the multi-parameter EFF pipeline.
+
+        ``results`` is a list of ``(param_name, folder, pdf_path, pptx_path)``.
+        """
+        self.overall_bar.setValue(100); self.overall_bar.setFormat("100%  (pipeline ✓)")
+        self.wafer_bar.setValue(100)
+        n = len(results)
+        self._grid_label.setText(f"✓  Complete — {n} parameter map set(s) generated")
+        lines = [f"✓  {n} parameter folder(s) written to the output directory:"]
+        for name, folder, pdf, pptx in results[:12]:
+            tag = "PDF + PPTX" if pptx else "PDF"
+            lines.append(f"   • {os.path.basename(folder)}   ({tag})")
+        if n > 12:
+            lines.append(f"   … and {n - 12} more")
+        self._status("\n".join(lines), _GREEN)
+        self.out_path_lbl.setText(self.out_edit.text().strip())
+        self.open_btn.setEnabled(True); self._reset()
+        import gc; gc.collect()
 
     def _on_err(self, msg: str) -> None:
         if msg == "Cancelled by user.":

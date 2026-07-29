@@ -7,13 +7,16 @@ JSON so it can be re-run or scheduled offline.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from datetime import datetime
 from pathlib import Path
 
 JOB_SUFFIX = ".wtjob"
 JOB_FORMAT = "wafer-tool-job"
 JOB_VERSION = 1
+
+# .eff extensions this job type recognises as "raw EFF, not a converted txt".
+_EFF_EXTS = (".eff",)
 
 _PLOT_KEYS = ("t_low", "t_high", "use_log", "high_is_green",
               "mirror_x", "mirror_y", "rot_deg")
@@ -38,10 +41,19 @@ class WaferJob:
     rot_deg: int = 0
     input_dir: str = ""              # when set, use newest match in this folder
     input_pattern: str = "*.txt"     # ';'-separated globs, e.g. "*.txt;*.csv"
+    # Raw-EFF jobs: the measurement parameter names to map (each -> its own
+    # output folder). Empty list means "every parameter in the file", the
+    # automation-friendly default. Ignored for txt/csv jobs.
+    eff_params: list[str] = field(default_factory=list)
 
     def plot_config_kwargs(self) -> dict:
         """The subset of fields that construct a PlotConfig."""
         return {k: getattr(self, k) for k in _PLOT_KEYS}
+
+    def is_eff_input(self, resolved_path: str | None = None) -> bool:
+        """True when this job's (resolved) input is a raw .eff extraction."""
+        path = resolved_path if resolved_path is not None else self.input_file
+        return bool(path) and path.lower().endswith(_EFF_EXTS)
 
     def resolve_input_file(self) -> str:
         """The data file this job should process right now.
@@ -84,7 +96,8 @@ def load_job(path: str | Path) -> WaferJob:
         data = json.load(handle)
     if data.get("format") != JOB_FORMAT:
         raise ValueError(f"not a {JOB_FORMAT} file: {path}")
-    fields = ("input_file", "out_dir", *_PLOT_KEYS, "input_dir", "input_pattern")
+    fields = ("input_file", "out_dir", *_PLOT_KEYS, "input_dir", "input_pattern",
+              "eff_params")
     missing = [f for f in ("out_dir", "t_low", "t_high") if f not in data]
     if missing:
         raise ValueError(f"job is missing required fields: {', '.join(missing)}")
