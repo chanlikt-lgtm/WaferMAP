@@ -30,6 +30,13 @@ LINES_PER_SUMMARY_PAGE: int = 55
 # bytes of 150 and assembles faster, while still looking crisp on screen.
 PAGE_PNG_DPI: int = 110
 
+# Adaptive DPI for the per-wafer archive PNGs. A wafer whose dies all fall in a
+# single threshold zone renders as one flat colour — no detail to resolve — so
+# it is saved at a LOW dpi (smaller/faster). A wafer spanning more than one zone
+# has colour boundaries worth resolving and is saved at a HIGH dpi.
+WAFER_PNG_DPI_UNIFORM:  int = 70    # single-zone (one colour) wafers
+WAFER_PNG_DPI_MULTIZONE: int = 150  # wafers with >1 zone (colour boundaries)
+
 
 # ---------------------------------------------------------------------------
 # ColorScheme

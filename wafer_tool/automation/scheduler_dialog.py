@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PyQt6.QtCore import QTime
+from PyQt6.QtGui import QBrush, QColor
 from PyQt6.QtWidgets import (
     QAbstractItemView, QComboBox, QDialog, QFileDialog, QHBoxLayout, QHeaderView,
     QLabel, QMessageBox, QPushButton, QSpinBox, QTableWidget, QTableWidgetItem,
@@ -17,6 +18,37 @@ from PyQt6.QtWidgets import (
 )
 
 from . import scheduler
+from .runner import (
+    EXIT_OK, EXIT_ERROR, EXIT_NO_OUTPUT, EXIT_MISSING_INPUT,
+    EXIT_NO_MATCH_IN_FOLDER, EXIT_BAD_JOB,
+)
+
+# Windows Task Scheduler pseudo-results (not process exit codes).
+_TS_RUNNING = 0x00041301   # 267009 — task currently running
+_TS_NOT_RUN = 0x00041303   # 267011 — task has not run yet
+_TS_QUEUED  = 0x00041325   # 267045 — task queued
+
+# Map a job's last exit code to (status text, colour).
+_STATUS_MAP = {
+    EXIT_OK:                 ("✓  Success",                 "#22c55e"),
+    EXIT_MISSING_INPUT:      ("✗  Missing input file (EFF)", "#ef4444"),
+    EXIT_NO_MATCH_IN_FOLDER: ("⚠  No matching file in folder", "#f59e0b"),
+    EXIT_BAD_JOB:            ("✗  Bad / missing job file",   "#ef4444"),
+    EXIT_NO_OUTPUT:          ("✗  Ran but no output",        "#ef4444"),
+    EXIT_ERROR:              ("✗  Failed (error)",           "#ef4444"),
+}
+
+
+def _status_for(job) -> tuple[str, str]:
+    """Human-readable (text, colour) for a scheduled job's last run."""
+    code = job.last_result
+    if code in (_TS_RUNNING, _TS_QUEUED):
+        return "▶  Running…", "#3b82f6"
+    if code == _TS_NOT_RUN or not job.last_run:
+        return "—  Not run yet", "#9ca3af"
+    if code in _STATUS_MAP:
+        return _STATUS_MAP[code]
+    return f"✗  Failed (code {code})", "#ef4444"
 
 
 class SchedulerDialog(QDialog):
@@ -29,15 +61,17 @@ class SchedulerDialog(QDialog):
 
         root = QVBoxLayout(self)
 
-        self._table = QTableWidget(0, 5)
+        self._table = QTableWidget(0, 6)
         self._table.setHorizontalHeaderLabels(
-            ["Task", "Job file", "Next run", "State", "Last result"])
+            ["Task", "Job file", "Next run", "State", "Last result", "Status"])
         self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._table.horizontalHeader().setSectionResizeMode(
             0, QHeaderView.ResizeMode.ResizeToContents)
         self._table.horizontalHeader().setSectionResizeMode(
             1, QHeaderView.ResizeMode.Stretch)
+        self._table.horizontalHeader().setSectionResizeMode(
+            5, QHeaderView.ResizeMode.ResizeToContents)
         self._table.itemSelectionChanged.connect(self._on_row_selected)
         root.addWidget(self._table)
 
@@ -106,11 +140,17 @@ class SchedulerDialog(QDialog):
         self._jobs = jobs
         self._table.setRowCount(len(jobs))
         for r, j in enumerate(jobs):
+            status_text, status_color = _status_for(j)
             vals = [j.task_name, Path(j.job_path).name if j.job_path else "?",
                     j.next_run or "—", j.state,
-                    "OK" if j.last_result == 0 else f"code {j.last_result}"]
+                    "OK" if j.last_result == 0 else f"code {j.last_result}",
+                    status_text]
             for c, v in enumerate(vals):
-                self._table.setItem(r, c, QTableWidgetItem(v))
+                item = QTableWidgetItem(v)
+                if c == 5:                       # Status — colour-coded + bold
+                    item.setForeground(QBrush(QColor(status_color)))
+                    font = item.font(); font.setBold(True); item.setFont(font)
+                self._table.setItem(r, c, item)
 
     def _selected_task(self) -> str | None:
         rows = self._table.selectionModel().selectedRows()

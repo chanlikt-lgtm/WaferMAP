@@ -14,6 +14,17 @@ from pathlib import Path
 
 from .job import load_job
 
+# Exit codes surfaced to Windows Task Scheduler as LastTaskResult, so the
+# Schedule Jobs dialog can show a meaningful per-job status. Keep in sync with
+# scheduler_dialog._status_for().
+EXIT_OK = 0                 # report generated
+EXIT_ERROR = 1              # unexpected error during generation
+EXIT_USAGE = 2              # no job path given
+EXIT_NO_OUTPUT = 3          # ran but produced no PDF
+EXIT_MISSING_INPUT = 10     # the job's input file (e.g. .eff) does not exist
+EXIT_NO_MATCH_IN_FOLDER = 11  # folder-mode job: nothing matched the pattern
+EXIT_BAD_JOB = 12           # the .wtjob file is missing / invalid
+
 
 def _force_utf8_stdout() -> None:
     """The pipeline prints check/cross glyphs; under a scheduled task stdout is a
@@ -34,11 +45,16 @@ def run_job(job_path: str | Path, *, progress=None) -> tuple[str, str | None, st
     to the *last* parameter processed (its ``pdf`` still drives the exit code),
     and every parameter folder is printed as it completes.
     """
+    job = load_job(job_path)
+    input_file = job.resolve_input_file()   # newest-in-folder jobs pick the latest file here
+    return _run_loaded(job, input_file, progress=progress)
+
+
+def _run_loaded(job, input_file: str, *, progress=None) -> tuple[str, str | None, str]:
+    """Generate the report for an already-loaded job + resolved input file."""
     from wafer_tool import PlotConfig, generate_report
 
-    job = load_job(job_path)
     config = PlotConfig(**job.plot_config_kwargs())
-    input_file = job.resolve_input_file()   # newest-in-folder jobs pick the latest file here
 
     def _log(line: str) -> None:
         if progress:
@@ -103,16 +119,39 @@ def main(argv: list[str] | None = None) -> int:
         job = args[args.index("--run-job") + 1] if "--run-job" in args else args[0]
     if not job:
         print("usage: python -m wafer_tool.automation.runner <job.wtjob>", file=sys.stderr)
-        return 2
+        return EXIT_USAGE
+
+    # Each step maps to a distinct exit code so the scheduler UI can say *why*
+    # a run failed (missing input vs. bad job vs. other error).
     try:
-        pdf, csv, pptx = run_job(job)
+        wafer_job = load_job(job)
+    except Exception as exc:
+        print(f"bad job file: {exc}", file=sys.stderr)
+        return EXIT_BAD_JOB
+
+    try:
+        input_file = wafer_job.resolve_input_file()
+    except FileNotFoundError as exc:
+        print(f"no matching input file in folder: {exc}", file=sys.stderr)
+        return EXIT_NO_MATCH_IN_FOLDER
+
+    if not os.path.isfile(input_file):
+        print(f"input file not found: {input_file}", file=sys.stderr)
+        return EXIT_MISSING_INPUT
+
+    try:
+        pdf, csv, pptx = _run_loaded(wafer_job, input_file)
+    except FileNotFoundError as exc:
+        print(f"input file not found: {exc}", file=sys.stderr)
+        return EXIT_MISSING_INPUT
     except Exception as exc:  # surfaced as a non-zero exit for the scheduler
         print(f"job failed: {exc}", file=sys.stderr)
-        return 1
+        return EXIT_ERROR
+
     print(f"PDF  -> {pdf}")
     print(f"CSV  -> {csv}")
     print(f"PPTX -> {pptx}")
-    return 0 if pdf else 3
+    return EXIT_OK if pdf else EXIT_NO_OUTPUT
 
 
 if __name__ == "__main__":

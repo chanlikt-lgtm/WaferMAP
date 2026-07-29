@@ -1,0 +1,666 @@
+\documentclass[11pt,a4paper]{report}
+
+% ---------------------------------------------------------------------------
+% Packages (conservative, widely available in TeX Live)
+% ---------------------------------------------------------------------------
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage[a4paper,margin=2.4cm]{geometry}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{fancyhdr}
+\usepackage{parskip}
+\usepackage[hidelinks]{hyperref}
+
+% ---------------------------------------------------------------------------
+% Colours & styles
+% ---------------------------------------------------------------------------
+\definecolor{accent}{HTML}{5B21B6}
+\definecolor{accent2}{HTML}{7C3AED}
+\definecolor{codebg}{HTML}{F5F5FA}
+\definecolor{codeborder}{HTML}{D0D0E0}
+\definecolor{kw}{HTML}{7C3AED}
+\definecolor{str}{HTML}{16A34A}
+\definecolor{com}{HTML}{6B7280}
+\definecolor{zgreen}{HTML}{16A34A}
+\definecolor{zamber}{HTML}{D97706}
+\definecolor{zred}{HTML}{DC2626}
+\definecolor{muted}{HTML}{555577}
+
+\hypersetup{colorlinks=true, linkcolor=accent, urlcolor=accent2}
+
+\lstdefinestyle{py}{
+  language=Python,
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  keywordstyle=\color{kw}\bfseries,
+  stringstyle=\color{str},
+  commentstyle=\color{com}\itshape,
+  frame=single, rulecolor=\color{codeborder},
+  showstringspaces=false,
+  breaklines=true, breakatwhitespace=true,
+  columns=fullflexible, keepspaces=true,
+  numbers=none, xleftmargin=6pt, xrightmargin=4pt,
+  aboveskip=8pt, belowskip=6pt,
+}
+\lstdefinestyle{plain}{
+  backgroundcolor=\color{codebg},
+  basicstyle=\ttfamily\small,
+  frame=single, rulecolor=\color{codeborder},
+  breaklines=true, columns=fullflexible, keepspaces=true,
+  xleftmargin=6pt, xrightmargin=4pt, aboveskip=8pt, belowskip=6pt,
+}
+\lstset{style=py}
+\newcommand{\code}[1]{\texttt{#1}}
+
+% Headers / footers
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\small\textcolor{muted}{Wafer Map Tool}}
+\rhead{\small\textcolor{muted}{Architecture \& Design}}
+\rfoot{\small\thepage}
+\lfoot{\small\textcolor{muted}{\leftmark}}
+\renewcommand{\headrulewidth}{0.3pt}
+
+% ---------------------------------------------------------------------------
+\begin{document}
+
+% ===== Title page ==========================================================
+\begin{titlepage}
+\centering
+\vspace*{3cm}
+{\Huge\bfseries\textcolor{accent}{Wafer Map Tool}}\\[6pt]
+{\LARGE Architecture, Pipeline, GUI \& Automation}\\[4pt]
+{\large Technical Reference}\\[2cm]
+\begin{tabular}{rl}
+\textbf{Component} & Wafer Map Tool (\code{wafer\_tool} package)\\[4pt]
+\textbf{Scope} & EFF ingestion, wafer-map rendering, PDF/PPTX/CSV\\
+ & reporting, interactive GUI, offline automation\\[4pt]
+\textbf{Platform} & Windows (PyQt6); headless runner is cross-platform\\[4pt]
+\textbf{Rendering} & Matplotlib (Agg) + SciPy interpolation\\
+\end{tabular}
+\vfill
+{\large\textcolor{muted}{Generated \today}}
+\end{titlepage}
+
+\tableofcontents
+\clearpage
+
+% ===========================================================================
+\chapter{Introduction}
+
+The \textbf{Wafer Map Tool} turns per-die parametric measurements into
+colour-coded wafer maps and packages them into a multi-page \textbf{PDF},
+a \textbf{PowerPoint} deck, and a summary \textbf{CSV}. It accepts two kinds of
+input:
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Raw \code{.eff} extraction files} — the native semicolon-delimited
+        export from the eSquare / EBS-XE test flow, containing many measurement
+        parameters. The tool scans the header, lets the user pick which
+        parameters to map, and produces one output folder per parameter.
+  \item \textbf{Converted \code{.txt}/\code{.csv} files} — a single measurement
+        column already extracted to a four-column
+        \code{lot wafer\,/\,x\,/\,y\,/\,value} layout.
+\end{itemize}
+
+The application has three faces sharing one rendering core:
+
+\begin{enumerate}[leftmargin=1.6em]
+  \item An interactive \textbf{PyQt6 GUI} with live wafer-thumbnail preview,
+        threshold scatter and histogram tabs, and a per-parameter preview pager.
+  \item A \textbf{headless runner} that replays a saved job with no GUI, suitable
+        for scheduled / offline execution.
+  \item A \textbf{Windows Task Scheduler} integration that runs saved jobs
+        daily / weekly / monthly and reports their status.
+\end{enumerate}
+
+\section{Reading this document}
+Chapter~\ref{ch:arch} gives the module map and layering rules. Chapters
+\ref{ch:data}--\ref{ch:exporters} follow the data through the pipeline, from file
+formats to the rendered report. Chapter~\ref{ch:gui} covers the GUI and
+Chapter~\ref{ch:auto} the automation. Chapters
+\ref{ch:concurrency}--\ref{ch:modularity} discuss the concurrency model,
+performance and the modularity assessment.
+
+% ===========================================================================
+\chapter{High-Level Architecture}\label{ch:arch}
+
+\section{Layered design}
+The package is organised as a set of layers with a strict downward dependency
+rule: higher layers may import lower ones, never the reverse. The GUI and the
+headless runner are two \emph{drivers} that sit on top of the same
+GUI-free core.
+
+\begin{lstlisting}[style=plain]
++---------------------------------------------------------------+
+|  DRIVERS                                                      |
+|  ui/ (PyQt6 widgets, main window)   automation/runner (CLI)   |
++------------------------+--------------------------------------+
+|  ORCHESTRATION         |                                      |
+|  report.generate_report        eff_pipeline.process_eff       |
+|  eff_worker (Qt)  worker (Qt)   automation/job, scheduler      |
++---------------------------------------------------------------+
+|  EXPORTERS                                                    |
+|  exporters/pdf_exporter  pptx_exporter  csv_exporter          |
+|  exporters/report_charts (scatter / histogram pages)          |
++---------------------------------------------------------------+
+|  CORE RENDERING & DATA                                        |
+|  plotting  geometry  statistics  data_loader  eff_loader      |
+|  config (PlotConfig, ColorScheme)   logger   exceptions       |
++---------------------------------------------------------------+
+             (compiled C parser: eff_parser is external)
+\end{lstlisting}
+
+\section{Module responsibilities}
+\begin{longtable}{@{}p{4.3cm}p{10.2cm}@{}}
+\toprule
+\textbf{Module} & \textbf{Responsibility}\\
+\midrule
+\endhead
+\code{config.py} & \code{PlotConfig} (thresholds, log, mirror, rotation) and
+  \code{ColorScheme}; tuning constants (\code{GRID\_RESOLUTION},
+  \code{MAX\_WAFERS\_PER\_PAGE}, \code{PAGE\_PNG\_DPI}).\\
+\code{geometry.py} & Spatial transforms (mirror / rotation) and
+  \code{build\_wafer\_grid} — the SciPy \code{griddata} interpolation onto a
+  square mesh.\\
+\code{plotting.py} & \code{draw\_wafer\_ax} — renders one wafer contour map onto a
+  Matplotlib axes.\\
+\code{statistics.py} & 8-condition classification counts and the summary bar
+  chart page.\\
+\code{data\_loader.py} & Reads converted \code{.txt}/\code{.csv} into a typed
+  DataFrame (\code{lot, wafer, x, y, value}).\\
+\code{eff\_loader.py} & Self-contained \code{.eff} reader: header scan, coordinate
+  / measurement-column resolution, spec-limit capture, streaming per-parameter
+  extraction, and an in-memory single-parameter reader for previews.\\
+\code{report.py} & End-to-end pipeline orchestrator: load $\to$ statistics $\to$
+  per-wafer PNGs $\to$ PDF $\to$ CSV $\to$ PPTX.\\
+\code{eff\_pipeline.py} & GUI-free orchestration for the multi-parameter EFF
+  workflow (\code{process\_eff}); shared by the GUI worker and the headless
+  runner.\\
+\code{eff\_worker.py} & Thin Qt \code{QThread} adapters: \code{EffReportWorker}
+  and \code{EffPreviewWorker}.\\
+\code{worker.py} & \code{ReportWorker} \code{QThread} for the single-file
+  (txt/csv) workflow.\\
+\code{exporters/} & \code{pdf\_exporter}, \code{pptx\_exporter},
+  \code{csv\_exporter}, and \code{report\_charts} (overview scatter/histogram).\\
+\code{ui/} & \code{main\_window}, \code{histogram\_widget},
+  \code{eff\_param\_dialog}, \code{orientation\_widget}, \code{threshold\_viz\_widget}.\\
+\code{automation/} & \code{job} (the \code{.wtjob} format), \code{runner}
+  (headless replay), \code{scheduler} (Task Scheduler), \code{scheduler\_dialog}.\\
+\bottomrule
+\end{longtable}
+
+\section{Key design principle}
+The most important structural decision is that \textbf{all report generation is
+GUI-free}. \code{report.generate\_report} and \code{eff\_pipeline.process\_eff}
+depend only on Matplotlib/pandas/SciPy, never on PyQt. This is what makes the
+same logic runnable both interactively (behind a \code{QThread}) and headless
+(from the scheduler), guaranteeing identical output.
+
+% ===========================================================================
+\chapter{Data Model \& File Formats}\label{ch:data}
+
+\section{The EFF extraction file}
+An \code{.eff} file is a \emph{semicolon-delimited text} export. After a block of
+\code{<<Section>>} metadata it carries a set of \code{<...>} header rows and then
+one row per die:
+
+\begin{lstlisting}[style=plain]
+<<EFF:1.00>>;Headers=24;Rows=1527;Columns=109;...
+<DataType>;Text;Int;Int;Int;...;Double;Double;...
+<+ParameterName>;Lot;Wafer;X;Y;...;RON_VD__10_75;...
+<SourceTable>;;;MeasPartPos;MeasPartPos;...;MeasPartVals;...
+<LIMIT:SPEC:LOWER_VALUE>;;;;;...;0.0;...
+<LIMIT:SPEC:UPPER_VALUE>;;;;;...;31.0;...
+1E351778;01;8;5;...;-113.25;...        <- data rows
+\end{lstlisting}
+
+\noindent Resolution rules (implemented in \code{eff\_loader.py}, mirroring the
+standalone \code{eff\_converter}):
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Coordinates} — the columns named \code{Lot} (or \code{LotNumber}),
+        \code{Wafer}, \code{X}, \code{Y} are located case-insensitively and are
+        always loaded.
+  \item \textbf{Measurement parameters} — a column is selectable when its
+        \code{<SourceTable>} is \code{MeasPartVals}, or (fallback) it is a
+        floating type carrying spec limits.
+  \item \textbf{Spec limits} — \code{<LIMIT:SPEC:LOWER\_VALUE>} and
+        \code{UPPER\_VALUE} are captured per parameter and used to pre-fill the
+        GUI thresholds.
+\end{itemize}
+
+The row count (\code{Rows=}) is read from the \code{<<EFF>>} line for a progress
+estimate; only the header is read during a \emph{scan}, so scanning a multi-GB
+file is fast.
+
+\section{The converted TXT layout}
+The single-parameter text file is four tab-separated columns:
+\begin{lstlisting}[style=plain]
+1E351778 01<TAB>8<TAB>5<TAB>-113.25
+   |          |    |    |
+   lot wafer  x    y    value
+\end{lstlisting}
+\code{data\_loader.read\_wafer\_data} parses this with pandas' fast C engine,
+forcing the identifier column to text (so leading-zero wafer ids like ``01''
+survive) and letting numeric columns parse natively.
+
+\section{PlotConfig \& ColorScheme}
+\code{PlotConfig} is the single typed bundle of user plotting choices passed
+through the whole pipeline:
+
+\begin{lstlisting}
+@dataclass
+class PlotConfig:
+    t_low: float          # Limit 1
+    t_high: float         # Limit 2  (auto-ordered t_low <= t_high)
+    use_log: bool = False
+    high_is_green: bool = False
+    mirror_x: bool = False
+    mirror_y: bool = False
+    rot_deg: int = 0      # one of 0/90/180/270
+\end{lstlisting}
+
+\code{ColorScheme.from\_mode(high\_is\_green)} yields the three zone colours
+(\textcolor{zgreen}{low}/\textcolor{zamber}{mid}/\textcolor{zred}{high} or the
+reverse). Zones: value $<$ Limit\,1, Limit\,1 $\le$ value $\le$ Limit\,2, and
+value $>$ Limit\,2.
+
+\section{The job file (.wtjob)}
+A \code{.wtjob} is JSON capturing everything ``Generate Report'' needs, so a run
+can be replayed offline. Beyond the \code{PlotConfig} fields it stores:
+
+\begin{longtable}{@{}p{3.6cm}p{10.9cm}@{}}
+\toprule
+\textbf{Field} & \textbf{Meaning}\\
+\midrule
+\endhead
+\code{input\_file} & Fixed input path (txt/csv or \code{.eff}).\\
+\code{input\_dir} + \code{input\_pattern} & Folder mode: pick the newest file
+  matching the pattern at run time (e.g.\ \code{*.eff}) — so a scheduled job
+  always processes the latest drop.\\
+\code{out\_dir} & Output directory.\\
+\code{eff\_params} & For raw \code{.eff}: the parameter names to map (one folder
+  each). Empty means ``all parameters''.\\
+\bottomrule
+\end{longtable}
+
+% ===========================================================================
+\chapter{The Report Pipeline}\label{ch:pipeline}
+
+\section{\code{generate\_report}}
+The single-file pipeline is \code{report.generate\_report(filepath, config,
+out\_dir, on\_progress, on\_wafer\_ready, render\_individual\_pngs, jobs)}. Its
+stages:
+
+\begin{enumerate}[leftmargin=1.6em]
+  \item \textbf{Load} the data (\code{read\_wafer\_data}).
+  \item \textbf{Statistics} — \code{calculate\_8\_condition\_statistics} classifies
+        every die into one of eight conditions.
+  \item \textbf{Per-wafer PNGs} (optional) — one square archive image per wafer,
+        rendered in parallel; feeds the live GUI preview and lands in the output.
+  \item \textbf{PDF} — \code{generate\_pdf} builds the multi-page report.
+  \item \textbf{CSV} — \code{export\_color\_summary\_csv}.
+  \item \textbf{PPTX} — \code{create\_powerpoint\_report} assembles page snapshots.
+\end{enumerate}
+
+Two callbacks decouple the pipeline from any UI: \code{on\_progress(current,
+total, message)} and \code{on\_wafer\_ready(lot, wafer, png\_path)}. A
+\code{RuntimeError} raised from \code{on\_progress} is the cancellation channel.
+
+\section{Progress \& cancellation contract}
+\code{total\_steps = n\_wafers + 3} (three export steps). The wafer-render phase
+reports one step per wafer; the last three are PDF / CSV / PPTX. The GUI worker
+translates these into two progress bars and cancels by raising
+\code{RuntimeError("Cancelled by user.")} from its progress slot.
+
+% ===========================================================================
+\chapter{EFF Ingestion Pipeline}\label{ch:eff}
+
+The EFF workflow turns \emph{one} file with \emph{many} parameters into one
+report per selected parameter. It is deliberately split so the interactive and
+automated paths run identical logic.
+
+\section{Scan}
+\code{eff\_loader.scan\_eff(path)} reads only the header and returns an
+\code{EffScan}: declared row/column counts, the resolved coordinate indices, and
+a list of \code{EffParameter} (index, name, dtype, \code{has\_limits},
+\code{limit\_lower}, \code{limit\_upper}). It stops at the first data row, so it
+is fast on very large files.
+
+\section{Extraction}
+\code{extract\_parameters(path, indices, out\_base\_dir, ...)} streams the whole
+file \emph{once} and writes one four-column text file per selected parameter into
+its own folder:
+\begin{lstlisting}[style=plain]
+<out_dir>/<parameter>/<parameter>.txt
+\end{lstlisting}
+Invalid values (empty, non-numeric, or $|v|\ge 10^{10}$ sentinels) are skipped.
+The per-parameter folder subsequently receives that parameter's PNGs, PDF, PPTX
+and CSV.
+
+\section{Orchestration: \code{process\_eff}}
+\code{eff\_pipeline.process\_eff} is the GUI-free core:
+\begin{enumerate}[leftmargin=1.6em]
+  \item Extract all selected parameters in one streaming pass
+        (\textasciitilde30\% of the progress bar).
+  \item For each parameter that yielded data, call \code{generate\_report} into
+        that parameter's folder.
+  \item Flatten the per-wafer PNGs up into the folder so images + PDF + PPTX + CSV
+        sit together.
+\end{enumerate}
+Progress is reported as \code{(overall\_pct, wafer\_pct, message)}; cancellation
+is an \code{EffCancelled} exception (converted to a \code{RuntimeError} inside the
+\code{generate\_report} call so the render aborts cleanly).
+
+\section{In-memory preview reader}
+\code{extract\_single\_param\_df} reads exactly one parameter into a DataFrame
+without touching disk. The GUI uses it (on a background thread) to draw the
+scatter/histogram preview for the currently-selected parameter.
+
+% ===========================================================================
+\chapter{Rendering Internals}\label{ch:render}
+
+\section{Interpolation (\code{geometry.build\_wafer\_grid})}
+Each wafer's scattered $(x,y,\text{value})$ dies are interpolated onto a
+\code{GRID\_RESOLUTION}$^2$ (default $100\times100$) square mesh with SciPy
+\code{griddata}, clamped to the data range, then masked to the wafer disc. This
+is the CPU-heavy step.
+
+\section{Drawing (\code{plotting.draw\_wafer\_ax})}
+Applies the spatial transforms, interpolates, maps values through the
+log-or-linear threshold levels, and paints three filled contour bands with the
+\code{ColorScheme} colours plus the wafer-edge circle.
+
+\section{Parallel rendering}
+Per-wafer PNGs and PDF grid pages are independent, so both render across a
+\code{ProcessPoolExecutor}. On Windows each worker re-imports Matplotlib
+(\textasciitilde7\,s fixed spawn cost), so pools are only used when they pay off:
+
+\begin{longtable}{@{}p{6.5cm}p{8.0cm}@{}}
+\toprule
+\textbf{Pass} & \textbf{Parallel threshold}\\
+\midrule
+\endhead
+Per-wafer PNGs (\code{report.\_render\_wafer\_pngs}) & $\ge 200$ wafers
+  (\code{\_PNG\_PARALLEL\_MIN}).\\
+PDF grid pages (\code{pdf\_exporter.\_render\_all\_grid\_pages}) & $\ge 8$ pages
+  $\approx 200$ wafers (\code{\_PDF\_PARALLEL\_MIN\_PAGES}).\\
+\bottomrule
+\end{longtable}
+
+\noindent Measured crossover is \textasciitilde160 wafers (100 wafers: parallel
+is $0.57\times$, i.e.\ slower; 500 wafers: $1.94\times$ faster). With both passes
+parallel, a 500-wafer report improved from \textasciitilde55\,s to
+\textasciitilde25\,s ($\sim2.2\times$).
+
+\section{Adaptive per-wafer DPI}
+The individual per-wafer archive PNGs use an adaptive output resolution keyed to
+how many threshold zones the wafer's die values span (\code{report.\_zone\_count},
+computed from the raw values --- no interpolation needed):
+\begin{itemize}[leftmargin=1.4em]
+  \item a wafer entirely within one zone renders as a single flat colour and is
+        saved at \code{WAFER\_PNG\_DPI\_UNIFORM} (70\,dpi);
+  \item a wafer spanning more than one zone has colour boundaries worth resolving
+        and is saved at \code{WAFER\_PNG\_DPI\_MULTIZONE} (150\,dpi).
+\end{itemize}
+Measured: a uniform wafer $\to 560\times560$\,px ($\sim$5.6\,KB); a three-zone
+wafer $\to 1200\times1200$\,px ($\sim$14\,KB). The rule keys off the zone count,
+not the specific colour, so an all-yellow or all-red wafer is also treated as
+uniform. The PDF grid cells are vector (resolution-independent) and the PPTX page
+snapshots mix 25 wafers, so adaptive DPI applies only to the standalone
+per-wafer images.
+
+\section{Overview charts (\code{exporters/report\_charts.py})}
+Headless, Matplotlib-only renderers for the report's front-page \textbf{Threshold
+Scatter} and \textbf{Value Histogram}, colour-matched to the wafer maps:
+\begin{itemize}[leftmargin=1.4em]
+  \item Scatter plots value against wafer (jittered into a per-wafer strip),
+        downsampling above 200{,}000 points.
+  \item Each threshold zone gets a distinct \textbf{shape}
+        (\textcolor{zred}{$\blacklozenge$ diamond} below Limit\,1,
+        \textcolor{zamber}{$\blacksquare$ square} mid,
+        \textcolor{zgreen}{$\bullet$ circle} above Limit\,2).
+  \item Marker size/alpha are \textbf{adaptive}: big and bold for sparse
+        parameters, small and light for dense ones (100k+ dies) so they do not
+        smear into solid bands ($\sim1$k pts $\to s\approx20$; $\sim200$k pts
+        $\to s\approx3$).
+\end{itemize}
+
+% ===========================================================================
+\chapter{Exporters}\label{ch:exporters}
+
+\section{PDF structure}
+\code{pdf\_exporter.generate\_pdf} builds a head section in the main process and
+merges per-lot grid pages (rendered in worker processes) with \code{pypdf},
+attaching bookmarks. Page order:
+
+\begin{enumerate}[leftmargin=1.6em]
+  \item \textbf{Threshold Scatter} (page 1)
+  \item \textbf{Value Histogram} (page 2)
+  \item \textbf{Summary Report} (lot/wafer counts, file metadata)
+  \item \textbf{8-Condition Distribution} bar chart
+  \item \textbf{Per-lot wafer grids} — a $5\times5$ grid (\code{MAX\_WAFERS\_PER\_PAGE}$=25$) per page
+\end{enumerate}
+
+Each grid page is a self-contained single-page \emph{vector} PDF produced by a
+picklable worker (\code{\_render\_grid\_page}); the main process merges them in
+order, so parallelism costs no quality.
+
+\section{PPTX}
+\code{create\_powerpoint\_report} is fed the PNG snapshots that the PDF pages
+emit as a side effect. It sorts them by leading page number (numerically, so a
+2000-slide deck past page 999 stays ordered), builds a title slide, and adds one
+image slide per page. Consequently the deck order matches the PDF, including the
+scatter and histogram front pages.
+
+\section{CSV}
+\code{export\_color\_summary\_csv} writes a per-wafer colour-zone count summary.
+
+% ===========================================================================
+\chapter{The Graphical Interface}\label{ch:gui}
+
+\section{Main window}
+\code{ui/main\_window.DataProcessorUI} is a split view: a left control panel
+(input file, thresholds, orientation, output folder, run/automation buttons) and
+a right panel of tabs.
+
+\begin{longtable}{@{}p{4.2cm}p{10.3cm}@{}}
+\toprule
+\textbf{Tab / widget} & \textbf{Purpose}\\
+\midrule
+\endhead
+Live Preview ($5\times5$) & Wafer thumbnails stream in as they render; resets per
+  lot.\\
+Threshold Scatter & Interactive scatter of the loaded parameter with log-Y
+  toggle.\\
+Histogram & \code{HistogramWidget} — colour-zoned distribution with log toggles
+  and a stats bar.\\
+Wafer Orientation & Live diagram reflecting rotation / mirror choices.\\
+\bottomrule
+\end{longtable}
+
+\section{EFF loading in the GUI}
+Choosing a \code{.eff} file opens the \textbf{parameter picker}
+(\code{eff\_param\_dialog}): Lot/Wafer/X/Y are shown as always-loaded
+coordinates; the user ticks one or more measurement parameters (filter,
+select-all, ``with spec limits'' helpers). On acceptance the tool enters
+\emph{EFF mode}.
+
+\section{Per-parameter preview pager}
+In EFF mode a selector bar appears above the tabs:
+\begin{lstlisting}[style=plain]
+[<- Prev]  [ 1/N  <parameter>  v ]  [Next ->]   <param>: 1,475 pts . 25 wafers
+\end{lstlisting}
+Paging (or the dropdown) loads that parameter's data on an
+\code{EffPreviewWorker} background thread and updates the scatter + histogram.
+Results are cached by column index, so revisiting a parameter is instant. On
+navigation the tool also:
+\begin{itemize}[leftmargin=1.4em]
+  \item auto-fills \textbf{Limit 1 / Limit 2} from that parameter's EFF spec
+        limits, and
+  \item shows the parameter name in the chart titles and a label in the
+        Parameters panel.
+\end{itemize}
+
+\section{Run \& worker signals}
+``Generate Report'' dispatches to \code{EffReportWorker} (EFF mode) or
+\code{ReportWorker} (txt/csv). Both are \code{QThread}s emitting
+\code{progress}, \code{wafer\_progress}, \code{status\_message},
+\code{wafer\_ready}, an error signal, and a completion signal
+(\code{report\_done} / \code{all\_done}). The window connects these to the two
+progress bars, the live grid, and the status line, and can cancel mid-run.
+
+% ===========================================================================
+\chapter{Automation}\label{ch:auto}
+
+\section{Saving \& replaying jobs}
+``Save Job'' gathers the current inputs into a \code{WaferJob} and writes a
+\code{.wtjob}. \code{automation/runner.py} replays it headlessly:
+\code{run\_job} $\to$ \code{\_run\_loaded}, dispatching to \code{process\_eff}
+for \code{.eff} inputs or \code{generate\_report} for txt/csv.
+
+\section{Exit codes}
+The runner returns a distinct exit code per outcome, surfaced to Windows Task
+Scheduler as \code{LastTaskResult}:
+
+\begin{longtable}{@{}rp{4.2cm}p{7.6cm}@{}}
+\toprule
+\textbf{Code} & \textbf{Constant} & \textbf{Meaning}\\
+\midrule
+\endhead
+0  & \code{EXIT\_OK} & report generated\\
+1  & \code{EXIT\_ERROR} & unexpected error during generation\\
+2  & \code{EXIT\_USAGE} & no job path given\\
+3  & \code{EXIT\_NO\_OUTPUT} & ran but produced no PDF\\
+10 & \code{EXIT\_MISSING\_INPUT} & the job's input file (e.g.\ \code{.eff}) is missing\\
+11 & \code{EXIT\_NO\_MATCH\_IN\_FOLDER} & folder-mode job matched no file\\
+12 & \code{EXIT\_BAD\_JOB} & the \code{.wtjob} is missing / invalid\\
+\bottomrule
+\end{longtable}
+
+\section{Windows Task Scheduler integration}
+\code{automation/scheduler.py} registers a task named \code{WaferTool\_Job\_<name>}
+per job. Daily and weekly triggers use PowerShell \code{ScheduledTasks} cmdlets;
+monthly uses Task Scheduler XML (PowerShell has no monthly-trigger cmdlet). Tasks
+run as the logged-on user with no stored password. The command line is either the
+frozen executable (\code{App.exe -{}-run-job <job>}) or
+\code{python run\_job.py <job>} in development.
+
+\section{Schedule Jobs dialog \& Status column}
+\code{scheduler\_dialog.SchedulerDialog} lists the registered tasks and lets the
+user schedule / run-now / remove them. A colour-coded \textbf{Status} column maps
+the last exit code (via \code{\_status\_for}) to a readable outcome:
+
+\begin{longtable}{@{}p{6.8cm}p{2.4cm}p{4.6cm}@{}}
+\toprule
+\textbf{Status} & \textbf{Colour} & \textbf{Trigger}\\
+\midrule
+\endhead
+\textcolor{zgreen}{$\checkmark$ Success} & green & code 0\\
+\textcolor{zred}{$\times$ Missing input file (EFF)} & red & code 10\\
+\textcolor{zamber}{$\triangle$ No matching file in folder} & amber & code 11\\
+\textcolor{zred}{$\times$ Bad / missing job file} & red & code 12\\
+\textcolor{zred}{$\times$ Ran but no output} & red & code 3\\
+\textcolor{zred}{$\times$ Failed (error)} & red & code 1 / other\\
+$\blacktriangleright$ Running\ldots & blue & Task Scheduler ``running''\\
+--- Not run yet & grey & never run\\
+\bottomrule
+\end{longtable}
+
+% ===========================================================================
+\chapter{Concurrency Model}\label{ch:concurrency}
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Qt threads} — long operations (report generation, EFF parameter
+        preview) run on \code{QThread}s so the UI never blocks. They communicate
+        with the UI only through Qt signals.
+  \item \textbf{Process pools} — CPU-bound rendering (wafer PNGs, PDF grid pages)
+        fans out across processes with \code{ProcessPoolExecutor}; results are
+        consumed in submission order so the live preview stays ordered.
+  \item \textbf{Cancellation} — a \code{threading.Event} in each worker; the
+        pipeline observes it through the progress callback (raising
+        \code{RuntimeError}) and at chunk / parameter boundaries.
+  \item \textbf{Within vs.\ across parameters} — the EFF pipeline processes
+        parameters sequentially, each internally parallel, to keep all cores busy
+        without oversubscribing nested pools.
+\end{itemize}
+
+% ===========================================================================
+\chapter{Performance \& Scalability}\label{ch:perf}
+
+\section{What scales well}
+EFF extraction \emph{streams} (no whole-file materialisation); per-wafer grids are
+freed immediately after drawing; rendering is parallelised; the PPTX slide images
+are produced as a by-product of the PDF pages rather than a third pass; and
+uniform wafers are saved at a lower DPI (see \S\,\ref{ch:render}) so common
+single-colour wafers cost little disk.
+
+\section{Known limits}
+\begin{enumerate}[leftmargin=1.6em]
+  \item \textbf{No wafer-count ceiling.} Everything downstream is
+        $O(n_\text{wafers})$: the statistics loop, the CSV loop, $N$ PDF pages,
+        $N$ PNGs, $N$ slides. A file that resolves to $\sim$195{,}000 wafers
+        (dense parametric data across many lots) makes a run impractical. The
+        recommended fix is a \emph{guardrail} that warns before rendering an
+        unreasonable wafer count.
+  \item \textbf{Pure-Python per-wafer loops} in \code{statistics.py} and
+        \code{csv\_exporter.py} iterate every group in Python; vectorising with a
+        single pandas \code{groupby().agg()} would cut these dramatically at 100k+
+        wafers.
+  \item \textbf{Full-file materialisation on the txt path} — the converted-text
+        loader reads the entire file into memory.
+  \item \textbf{Interpolation is cheap for sparse wafers.} A measured experiment
+        showed that caching interpolated grids to disk to avoid a second
+        interpolation was \emph{slower} than recomputing (disk load
+        $\approx52$\,ms vs.\ \code{griddata} $\approx11$\,ms for $\sim$9-point
+        wafers), so that optimisation was deliberately \emph{not} adopted.
+\end{enumerate}
+
+% ===========================================================================
+\chapter{Modularity Assessment}\label{ch:modularity}
+
+\textbf{Strengths.} Clear downward-only layering; the EFF layer
+(\code{eff\_loader} $\to$ \code{eff\_pipeline} $\to$ \code{eff\_worker}) cleanly
+separates I/O, GUI-free orchestration, and the Qt adapter; exporters are isolated
+behind functions; one core renders for both GUI and report.
+
+\textbf{Opportunities.}
+\begin{enumerate}[leftmargin=1.6em]
+  \item \code{ui/main\_window.py} is large ($\sim$1.6k lines) and mixes reusable
+        canvases, the main window, and business logic
+        (\code{\_gather\_job}, EFF wiring). Extracting the canvases to their own
+        module and moving job-gathering out of the UI would slim it.
+  \item The scatter/histogram exist \emph{twice} (GUI canvases vs.\
+        \code{report\_charts}); sharing one axes-level renderer would remove drift.
+  \item Some dead / legacy code (an unused \code{HistogramCanvas},
+        \code{*\_old.py} files) can be removed.
+\end{enumerate}
+
+% ===========================================================================
+\chapter{Build \& Run}\label{ch:build}
+
+\begin{itemize}[leftmargin=1.4em]
+  \item \textbf{Interactive:} \code{python main.py} (PyQt6).
+  \item \textbf{Headless job:} \code{python run\_job.py <job.wtjob>} — fixes
+        \code{sys.path} then calls \code{automation.runner.main}.
+  \item \textbf{Packaging:} PyInstaller spec files (\code{main.spec},
+        \code{WaferMapTool.spec}); the PPTX template and compiled parser are
+        bundled and resolved from \code{sys.\_MEIPASS} when frozen.
+  \item \textbf{Dependencies:} PyQt6, matplotlib, numpy, pandas, scipy, pypdf,
+        python-pptx (optional; PPTX is skipped gracefully if absent).
+\end{itemize}
+
+\vspace{1cm}
+\begin{center}
+\textcolor{muted}{\rule{0.5\textwidth}{0.4pt}}\\[4pt]
+\textcolor{muted}{\small End of document}
+\end{center}
+
+\end{document}

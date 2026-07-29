@@ -38,7 +38,7 @@ import matplotlib
 matplotlib.use("Agg")          # non-interactive; safe on worker threads
 import matplotlib.pyplot as plt
 
-from .config import PlotConfig
+from .config import PlotConfig, WAFER_PNG_DPI_UNIFORM, WAFER_PNG_DPI_MULTIZONE
 from .data_loader import read_wafer_data
 from .logger import log, log_exception
 from .plotting import draw_wafer_ax
@@ -203,6 +203,18 @@ def generate_report(
 _PNG_PARALLEL_MIN = 200
 
 
+def _zone_count(sub, config: PlotConfig) -> int:
+    """How many threshold zones this wafer's die values span (1, 2 or 3).
+
+    Uses the raw values (no interpolation needed), so it is cheap. A result of 1
+    means the wafer is a single uniform colour.
+    """
+    lo = min(config.t_low, config.t_high)
+    hi = max(config.t_low, config.t_high)
+    v = sub["value"].to_numpy()
+    return int((v < lo).any()) + int(((v >= lo) & (v <= hi)).any()) + int((v > hi).any())
+
+
 def _render_one_wafer_png(job: tuple) -> tuple:
     """Render ONE wafer's square archive PNG. Top-level + picklable so it can
     run in a spawned worker process. Returns (lot_id, wafer_id, path, valid)."""
@@ -212,6 +224,11 @@ def _render_one_wafer_png(job: tuple) -> tuple:
     matplotlib.use("Agg")
     import matplotlib.pyplot as _plt
 
+    # Adaptive DPI: a single-zone (uniform colour) wafer carries no detail worth
+    # resolving, so save it small; a wafer spanning >1 zone has colour
+    # boundaries and is saved crisp.
+    dpi = WAFER_PNG_DPI_MULTIZONE if _zone_count(sub, config) > 1 else WAFER_PNG_DPI_UNIFORM
+
     fig = None
     valid = False
     try:
@@ -220,7 +237,7 @@ def _render_one_wafer_png(job: tuple) -> tuple:
         valid = draw_wafer_ax(ax, sub, wid, config,
                               show_legend=False, show_title=False)
         if valid:
-            fig.savefig(out_path, bbox_inches="tight", pad_inches=0)
+            fig.savefig(out_path, bbox_inches="tight", pad_inches=0, dpi=dpi)
     except Exception:
         valid = False
     finally:
