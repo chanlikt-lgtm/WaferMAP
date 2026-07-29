@@ -106,27 +106,33 @@ def generate_pdf(
     lot_groups = data.groupby("lot")
     bookmarks: list[tuple[str, int]] = []
 
-    # ── HEAD: summary text + 8-condition chart (main process; cheap) ────────
+    # ── HEAD (main process; cheap) ──────────────────────────────────────────
+    # The report opens on the overview charts — Threshold Scatter (page 1) and
+    # Value Histogram (page 2) — followed by the textual summary and the
+    # 8-condition breakdown, then the per-lot wafer grids.
     with PdfPages(head_pdf) as pdf:
-        bookmarks.append(("Summary Report", 0))
-        display_counter, pdf_page_idx = _write_summary_text(
-            pdf, lot_groups, filepath, config, 1, 0, page_png_dir=page_png_dir,
+        display_counter = 1
+
+        bookmarks.append(("Threshold Scatter", 0))
+        display_counter = _add_scatter_page(
+            pdf, data, config, base_name, display_counter, page_png_dir)
+
+        bookmarks.append(("Value Histogram", 1))
+        display_counter = _add_histogram_page(
+            pdf, data, config, base_name, display_counter, page_png_dir)
+
+        bookmarks.append(("Summary Report", 2))
+        display_counter, n_summary = _write_summary_text(
+            pdf, lot_groups, filepath, config, display_counter, 0,
+            page_png_dir=page_png_dir,
         )
-        bookmarks.append(("8-Condition Distribution", pdf_page_idx))
+
+        bookmarks.append(("8-Condition Distribution", 2 + n_summary))
         display_counter = create_8_condition_summary_page(
             pdf, condition_result, config, filepath, display_counter,
             save_png_path=_page_png_path(
                 page_png_dir, display_counter, "8_condition_distribution"),
         )
-        # Overview charts on the front pages (same as the GUI Scatter/Histogram
-        # tabs). pdf_page_idx counts summary pages; the 8-condition page added
-        # one, so these land right after it.
-        bookmarks.append(("Threshold Scatter", pdf_page_idx + 1))
-        display_counter = _add_scatter_page(
-            pdf, data, config, base_name, display_counter, page_png_dir)
-        bookmarks.append(("Value Histogram", pdf_page_idx + 2))
-        display_counter = _add_histogram_page(
-            pdf, data, config, base_name, display_counter, page_png_dir)
     n_head = len(PdfReader(head_pdf).pages)
 
     # ── Build the per-lot grid-page jobs ────────────────────────────────────
@@ -226,6 +232,10 @@ def _write_summary_text(
 
     all_lines = (header + lot_block).split("\n")
 
+    # Local 1-based index within the summary section, so the derived slide title
+    # is "Summary Report" (page 1) regardless of where the summary sits in the
+    # overall report — the global page order comes from display_counter.
+    summary_page_no = 1
     for page_start in range(0, len(all_lines), LINES_PER_SUMMARY_PAGE):
         chunk = "\n".join(all_lines[page_start: page_start + LINES_PER_SUMMARY_PAGE])
         fig, ax = plt.subplots(figsize=(8.27, 11.69))
@@ -235,8 +245,9 @@ def _write_summary_text(
                  fontsize=11, fontweight="bold", ha="right", va="bottom")
         pdf.savefig(fig)
         page_png_path = _page_png_path(
-            page_png_dir, display_counter, f"summary_report_page_{display_counter}"
+            page_png_dir, display_counter, f"summary_report_page_{summary_page_no}"
         )
+        summary_page_no += 1
         if page_png_path:
             fig.savefig(page_png_path, bbox_inches="tight", dpi=PAGE_PNG_DPI)
         plt.close(fig)

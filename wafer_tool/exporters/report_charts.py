@@ -29,6 +29,19 @@ def _zone_colors(config: PlotConfig) -> tuple[str, str, str]:
     return cs.low, cs.mid, cs.high
 
 
+def _adaptive_marker(n: int) -> tuple[int, float]:
+    """Marker (size, alpha) scaled to the number of points plotted.
+
+    Sparse parameters get big, bold, opaque markers; dense ones (100k+ dies)
+    get small, light markers so overplotting doesn't smear into solid bands.
+    Tuned so ~1k pts → s≈20, ~50k → s≈5, ~200k → s≈3.
+    """
+    n = max(int(n), 1)
+    s_val = int(max(3, min(20, round(20.0 * (3000.0 / n) ** 0.5))))
+    a_val = float(max(0.35, min(0.70, 0.70 * (3000.0 / n) ** 0.25)))
+    return s_val, a_val
+
+
 def draw_scatter(
     ax,
     z: np.ndarray,
@@ -91,8 +104,12 @@ def draw_scatter(
 
     # ── Points, one scatter per zone (distinct shape + colour per zone) ───
     # low = diamond, mid = square, high = circle — shape distinguishes zones
-    # even in greyscale / print.
-    kw = dict(s=20, alpha=0.6, linewidths=0.2, edgecolors="black")
+    # even in greyscale / print. Marker size & alpha adapt to how many points
+    # are actually plotted: big & bold for sparse parameters, small & light for
+    # dense ones (100k+ dies) so they don't smear into solid bands.
+    s_val, a_val = _adaptive_marker(z_s.size)
+    edge = dict(linewidths=0.3, edgecolors="black") if s_val >= 10 else dict(linewidths=0)
+    kw = dict(s=s_val, alpha=a_val, **edge)
     ax.scatter(x[z_s < lo],                    z_s[z_s < lo],                    color=c_low,  marker="D", **kw)
     ax.scatter(x[(z_s >= lo) & (z_s <= hi)],   z_s[(z_s >= lo) & (z_s <= hi)],   color=c_mid,  marker="s", **kw)
     ax.scatter(x[z_s > hi],                    z_s[z_s > hi],                    color=c_high, marker="o", **kw)
