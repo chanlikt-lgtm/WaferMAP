@@ -437,7 +437,12 @@ class ScatterCanvas(FigureCanvas):
         self._t_high        = -60.0
         self._high_is_green = False
         self._log_y         = False
+        self._param_label   = ""    # parameter name shown in the title bracket
         self._show_placeholder()
+
+    def set_param_label(self, label: str) -> None:
+        """Set the parameter name shown in brackets in the chart title."""
+        self._param_label = label or ""
 
     def _show_placeholder(self) -> None:
         self.ax.clear()
@@ -592,7 +597,10 @@ class ScatterCanvas(FigureCanvas):
             )
         ax.set_ylabel("Value", fontsize=10, fontweight="bold")
         ax.set_xlabel(xlabel, fontsize=9, color="#555")
-        ax.set_title("Threshold Scatter", fontsize=12, fontweight="bold")
+        title = "Threshold Scatter"
+        if self._param_label:
+            title += f"  ({self._param_label})"
+        ax.set_title(title, fontsize=12, fontweight="bold")
         ax.tick_params(axis="y", labelsize=8)
         ax.grid(axis="y", linestyle="--", alpha=0.4, color="#ccc")
         ax.grid(axis="x", linestyle=":",  alpha=0.25, color="#ccc")
@@ -756,6 +764,7 @@ class DataProcessorUI(QMainWindow):
         self._preview_worker = None   # background EFF single-parameter preview
         self._eff_preview_pos = 0     # which selected parameter is previewed
         self._preview_cache: dict[int, object] = {}  # param col index -> DataFrame
+        self._chart_param_label = ""  # parameter name shown in chart titles
         self._wafer_count  = 0
         self._total_wafers = 0
         self._loaded_values: np.ndarray | None = None  # value column only; full df freed after load
@@ -1220,6 +1229,7 @@ class DataProcessorUI(QMainWindow):
 
         name = self._eff_selected[pos]
         col_index = self._eff_indices[pos]
+        self._chart_param_label = name       # shown in scatter / histogram titles
 
         # Refresh the threshold limits to this parameter's spec limits.
         self._apply_param_limits(pos)
@@ -1260,6 +1270,7 @@ class DataProcessorUI(QMainWindow):
         self._eff_preview_status.setText(f"preview failed: {msg}")
 
     def _load_preview(self, path: str) -> None:
+        self._chart_param_label = ""     # no parameter name for plain txt/csv
         try:
             df = read_wafer_data(path)
         except Exception as exc:
@@ -1299,6 +1310,9 @@ class DataProcessorUI(QMainWindow):
         t_low  = self.t_low_edit.value()
         t_high = self.t_high_edit.value()
         hig    = self.hig_chk.isChecked()
+        # Show the current parameter name in the chart titles (EFF mode).
+        self._scatter_canvas.set_param_label(self._chart_param_label)
+        self._hist_widget.set_param_label(self._chart_param_label)
         self._scatter_canvas.update_plot(
             self._loaded_values, t_low, t_high, hig,
             self._loaded_wafer_codes, self._loaded_wafer_names,

@@ -131,10 +131,10 @@ def generate_report(
         _render_wafer_pngs(
             data, config,
             png_dir=png_dir,
-            pptx_png_dir=None,
             total_steps=total_steps,
             on_progress=on_progress,
             on_wafer_ready=on_wafer_ready,
+            jobs=jobs,
         )
         gc.collect()  # release matplotlib figure cache accumulated during render loop
     elif HAS_PPTX:
@@ -196,72 +196,101 @@ def generate_report(
 # Private helpers
 # ---------------------------------------------------------------------------
 
+# Process-pool spawn on Windows re-imports matplotlib in every worker (~7 s of
+# fixed overhead), so parallel PNG rendering only pays off for large reports.
+# Measured crossover is ~160 wafers (100: 0.57x slower; 500: 1.94x faster), so
+# we stay sequential below this and only spin up workers when they clearly win.
+_PNG_PARALLEL_MIN = 200
+
+
+def _render_one_wafer_png(job: tuple) -> tuple:
+    """Render ONE wafer's square archive PNG. Top-level + picklable so it can
+    run in a spawned worker process. Returns (lot_id, wafer_id, path, valid)."""
+    lot_id, wid, out_path, config, sub = job
+
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as _plt
+
+    fig = None
+    valid = False
+    try:
+        fig, ax = _plt.subplots(figsize=(8, 8), dpi=100)
+        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
+        valid = draw_wafer_ax(ax, sub, wid, config,
+                              show_legend=False, show_title=False)
+        if valid:
+            fig.savefig(out_path, bbox_inches="tight", pad_inches=0)
+    except Exception:
+        valid = False
+    finally:
+        if fig is not None:
+            _plt.close(fig)
+    return (lot_id, wid, out_path, valid)
+
+
 def _render_wafer_pngs(
     data,
     config: PlotConfig,
     png_dir: str,
-    pptx_png_dir: str | None,
     total_steps: int,
     on_progress: ProgressCallback | None,
     on_wafer_ready: WaferReadyCallback | None,
+    jobs: int | None = None,
 ) -> None:
     """
-    Render archive PNGs for every valid wafer.
+    Render one square archive PNG per valid wafer.
 
-    Figures are always closed in a finally block so a mid-render exception
-    cannot leak open Matplotlib figures and accumulate memory.
-    When a PPTX directory is provided, an additional wide-with-legend variant
-    is emitted for that legacy path, but callers may pass None.
+    These per-wafer maps are independent, so they render in parallel across
+    worker processes (each does its own grid interpolation + savefig) — the
+    same strategy the PDF grid pages use. Results are consumed in submission
+    order so the live GUI preview still fills lot-by-lot; small reports fall
+    back to sequential rendering where spawn overhead wouldn't pay off.
+
+    jobs : None → auto (min(cpu_count, 8)); 1 → sequential; N → N workers.
     """
-    step = 0
+    # Build one job per wafer, in lot→wafer order. The slice keeps only the
+    # numeric columns so the pickle sent to a worker stays tiny (no category
+    # index dragged along).
+    render_jobs: list[tuple] = []
     for lot_id, lot_df in data.groupby("lot"):
         for wid, w_df in lot_df.groupby("wafer"):
-            step += 1
             filename = f"{lot_id}_{wid}{config.log_suffix}.png"
-            _emit(on_progress, step, total_steps, f"Rendering {lot_id} W{wid}…")
+            sub = w_df[["x", "y", "value"]].copy()
+            render_jobs.append(
+                (str(lot_id), str(wid), os.path.join(png_dir, filename), config, sub)
+            )
 
-            # ── Square PNG (individual archive) ───────────────────────────
-            square_path = os.path.join(png_dir, filename)
-            fig = None
-            valid = False
-            try:
-                fig, ax = plt.subplots(figsize=(8, 8), dpi=100)
-                fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
-                valid = draw_wafer_ax(ax, w_df, wid, config,
-                                      show_legend=False, show_title=False)
-                if valid:
-                    fig.savefig(square_path, bbox_inches="tight", pad_inches=0)
-                else:
-                    log.warning("Skipped lot=%s wafer=%s — too few points (%d)",
-                                lot_id, wid, len(w_df))
-            except Exception as exc:
-                log_exception(exc, context=f"render lot={lot_id} wafer={wid}")
-            finally:
-                if fig is not None:
-                    plt.close(fig)
-                    fig = None   # explicit null so GC can collect before fig2
+    total = len(render_jobs)
+    if total == 0:
+        return
 
-            # Notify UI immediately so it can show a live preview
-            if valid and on_wafer_ready is not None:
-                on_wafer_ready(str(lot_id), str(wid), square_path)
+    def _consume(step: int, result: tuple) -> None:
+        lot_id, wid, out_path, valid = result
+        _emit(on_progress, step, total_steps, f"Rendering {lot_id} W{wid}…")
+        if valid:
+            if on_wafer_ready is not None:
+                on_wafer_ready(lot_id, wid, out_path)   # live preview, in order
+        else:
+            log.warning("Skipped lot=%s wafer=%s — too few points", lot_id, wid)
 
-            # ── Legend PNG (PPTX slides) ──────────────────────────────────
-            # fig is None here — square figure is fully released before this
-            # block allocates fig2, so only one figure exists at a time.
-            if pptx_png_dir and valid:
-                fig2 = None
-                try:
-                    fig2, ax2 = plt.subplots(figsize=(7, 5), dpi=80)
-                    draw_wafer_ax(ax2, w_df, wid, config,
-                                  show_legend=True, show_title=False)
-                    fig2.savefig(
-                        os.path.join(pptx_png_dir, filename),
-                        bbox_inches="tight", pad_inches=0.1,
-                    )
-                finally:
-                    if fig2 is not None:
-                        plt.close(fig2)
-                        fig2 = None  # explicit null for symmetry
+    want = (jobs is None or jobs > 1)
+    n_workers = jobs if (jobs and jobs > 1) else (os.cpu_count() or 1)
+    n_workers = max(1, min(n_workers, 8, total))
+
+    if want and n_workers > 1 and total >= _PNG_PARALLEL_MIN:
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+            with ProcessPoolExecutor(max_workers=n_workers) as ex:
+                # ex.map preserves submission order, so previews stay ordered.
+                for step, result in enumerate(ex.map(_render_one_wafer_png, render_jobs), 1):
+                    _consume(step, result)
+            return
+        except Exception as exc:  # pool unavailable / worker crash → sequential
+            print(f"⚠  Parallel PNG render failed ({exc}); using sequential.")
+
+    for step, job in enumerate(render_jobs, 1):
+        _consume(step, _render_one_wafer_png(job))
 
 
 def _emit(

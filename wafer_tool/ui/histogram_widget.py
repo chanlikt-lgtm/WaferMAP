@@ -10,6 +10,7 @@ Features
 - Stats panel: N, Min, Max, Mean, Median, Std displayed above the chart.
 - Threshold lines drawn as vertical dashed lines with labels.
 - Log-X axis toggle button (works even for data spanning many decades).
+- Log-Y axis toggle button for count scaling.
 - Graceful placeholder when no data is loaded.
 
 Public API
@@ -51,9 +52,15 @@ class HistogramWidget(QWidget):
         self._t_high:       float | None       = None
         self._high_is_green: bool              = False
         self._log_x:        bool               = False
+        self._log_y:        bool               = False
+        self._param_label:  str                = ""   # shown in title bracket
 
         self._build_ui()
         self._draw_placeholder()
+
+    def set_param_label(self, label: str) -> None:
+        """Set the parameter name shown in brackets in the histogram title."""
+        self._param_label = label or ""
 
     # ── Public API ────────────────────────────────────────────────────────
 
@@ -140,28 +147,41 @@ class HistogramWidget(QWidget):
         self._fig.subplots_adjust(left=0.13, right=0.97, top=0.88, bottom=0.15)
         root.addWidget(self._canvas, stretch=1)
 
-        # ── Log-X toggle button ───────────────────────────────────────────
+        # ── Axis toggle buttons ───────────────────────────────────────────
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         self._btn_log = QPushButton("Toggle Log X-axis  (OFF)")
+        self._btn_log.setObjectName("toggle_btn")
         self._btn_log.setCheckable(True)
         self._btn_log.setChecked(False)
-        self._btn_log.setFixedWidth(220)
-        self._btn_log.setStyleSheet(
-            "QPushButton { padding:4px 10px; border:1px solid #888; border-radius:4px; }"
-            "QPushButton:checked { background:#3a7bd5; color:white; font-weight:bold; }"
-        )
-        self._btn_log.toggled.connect(self._on_log_toggle)
+        self._btn_log.setFixedWidth(180)
+        self._btn_log.toggled.connect(self._on_log_x_toggle)
         btn_row.addWidget(self._btn_log)
+
+        self._btn_log_y = QPushButton("Toggle Log Y-axis  (OFF)")
+        self._btn_log_y.setObjectName("toggle_btn")
+        self._btn_log_y.setCheckable(True)
+        self._btn_log_y.setChecked(False)
+        self._btn_log_y.setFixedWidth(180)
+        self._btn_log_y.toggled.connect(self._on_log_y_toggle)
+        btn_row.addWidget(self._btn_log_y)
+
         btn_row.addStretch()
         root.addLayout(btn_row)
 
     # ── Slots ─────────────────────────────────────────────────────────────
 
-    def _on_log_toggle(self, checked: bool) -> None:
+    def _on_log_x_toggle(self, checked: bool) -> None:
         self._log_x = checked
         self._btn_log.setText(
             f"Toggle Log X-axis  ({'ON' if checked else 'OFF'})"
+        )
+        self.refresh()
+
+    def _on_log_y_toggle(self, checked: bool) -> None:
+        self._log_y = checked
+        self._btn_log_y.setText(
+            f"Toggle Log Y-axis  ({'ON' if checked else 'OFF'})"
         )
         self.refresh()
 
@@ -202,6 +222,9 @@ class HistogramWidget(QWidget):
             t_low_plot  = self._t_low
             t_high_plot = self._t_high
 
+        lo_plot, hi_plot = _ordered_limits(t_low_plot, t_high_plot)
+        lo_raw, hi_raw = _ordered_limits(self._t_low, self._t_high)
+
         # ── Auto-bin count ────────────────────────────────────────────────
         n_bins = _fd_bins(plot_vals)
 
@@ -209,14 +232,14 @@ class HistogramWidget(QWidget):
         bin_edges = np.linspace(plot_vals.min(), plot_vals.max(), n_bins + 1)
         _draw_colored_bars(
             ax, plot_vals, bin_edges,
-            t_low_plot, t_high_plot, self._high_is_green,
+            lo_plot, hi_plot, self._high_is_green,
         )
 
         # ── Threshold vertical lines ──────────────────────────────────────
         cs = _zone_colors(self._high_is_green)
         for t_val, raw_val, color, va in [
-            (t_low_plot,  self._t_low,  cs[0], "top"),
-            (t_high_plot, self._t_high, cs[2], "bottom"),
+            (lo_plot, lo_raw, cs[0], "top"),
+            (hi_plot, hi_raw, cs[2], "bottom"),
         ]:
             if t_val is not None:
                 ax.axvline(t_val, color="black", linewidth=1.8,
@@ -246,8 +269,15 @@ class HistogramWidget(QWidget):
             ax.set_xlabel("Measurement Value", fontsize=11,
                           fontweight="bold", labelpad=6)
 
-        ax.set_ylabel("Count", fontsize=11, fontweight="bold")
-        ax.set_title("Data Distribution", fontsize=13, fontweight="bold", pad=8)
+        if self._log_y:
+            ax.set_yscale("log")
+            ax.set_ylabel("Count  (log scale)", fontsize=11, fontweight="bold")
+        else:
+            ax.set_ylabel("Count", fontsize=11, fontweight="bold")
+        hist_title = "Data Distribution"
+        if self._param_label:
+            hist_title += f"  ({self._param_label})"
+        ax.set_title(hist_title, fontsize=13, fontweight="bold", pad=8)
         ax.grid(axis="y", linestyle="--", alpha=0.4, zorder=0)
         ax.tick_params(axis="x", labelsize=9)
         ax.tick_params(axis="y", labelsize=9)
@@ -255,8 +285,8 @@ class HistogramWidget(QWidget):
         # ── Legend ────────────────────────────────────────────────────────
         from matplotlib.patches import Patch
         low_c, mid_c, high_c = cs
-        t_lo = self._t_low  if self._t_low  is not None else "?"
-        t_hi = self._t_high if self._t_high is not None else "?"
+        t_lo = lo_raw if lo_raw is not None else "?"
+        t_hi = hi_raw if hi_raw is not None else "?"
         handles = [
             Patch(facecolor=low_c,  edgecolor="black", alpha=0.75,
                   label=f"< {t_lo:.3g}" if isinstance(t_lo, float) else f"< {t_lo}"),
@@ -315,6 +345,16 @@ def _zone_colors(high_is_green: bool) -> tuple[str, str, str]:
     return COLOR_GREEN, COLOR_YELLOW, COLOR_RED
 
 
+def _ordered_limits(
+    t_low: float | None,
+    t_high: float | None,
+) -> tuple[float | None, float | None]:
+    """Return thresholds in ascending order while preserving None values."""
+    if t_low is None or t_high is None:
+        return t_low, t_high
+    return min(t_low, t_high), max(t_low, t_high)
+
+
 def _draw_colored_bars(
     ax,
     vals:       np.ndarray,
@@ -335,19 +375,51 @@ def _draw_colored_bars(
             continue
         left  = bin_edges[i]
         right = bin_edges[i + 1]
-        mid   = (left + right) / 2.0
-        width = right - left
+        for seg_left, seg_right, color in _bin_segments(
+            left, right, t_low, t_high, low_c, mid_c, high_c
+        ):
+            ax.bar(
+                seg_left, count,
+                width=seg_right - seg_left, align="edge",
+                color=color, edgecolor="white",
+                linewidth=0.4, alpha=0.80, zorder=2,
+            )
 
-        if   t_low  is not None and mid < t_low:  color = low_c
-        elif t_high is not None and mid > t_high:  color = high_c
-        else:                                       color = mid_c
 
-        ax.bar(
-            left, count,
-            width=width, align="edge",
-            color=color, edgecolor="white",
-            linewidth=0.4, alpha=0.80, zorder=2,
-        )
+def _bin_segments(
+    left: float,
+    right: float,
+    t_low: float | None,
+    t_high: float | None,
+    low_c: str,
+    mid_c: str,
+    high_c: str,
+) -> list[tuple[float, float, str]]:
+    """Split one bin into threshold-aligned colour segments."""
+    bounds = [left]
+    if t_low is not None and left < t_low < right:
+        bounds.append(t_low)
+    if t_high is not None and left < t_high < right:
+        bounds.append(t_high)
+    bounds.append(right)
+    bounds.sort()
+
+    segments: list[tuple[float, float, str]] = []
+    for seg_left, seg_right in zip(bounds, bounds[1:]):
+        if seg_right <= seg_left:
+            continue
+
+        midpoint = (seg_left + seg_right) / 2.0
+        if t_low is not None and midpoint < t_low:
+            color = low_c
+        elif t_high is not None and midpoint > t_high:
+            color = high_c
+        else:
+            color = mid_c
+
+        segments.append((seg_left, seg_right, color))
+
+    return segments
 
 
 def _format_log_xaxis(ax) -> None:

@@ -33,9 +33,14 @@ from pypdf import PdfReader, PdfWriter
 
 from ..config import PlotConfig, MAX_WAFERS_PER_PAGE, LINES_PER_SUMMARY_PAGE, PAGE_PNG_DPI
 from ..plotting import draw_wafer_ax
+from .report_charts import draw_scatter, draw_histogram, wafer_codes_and_names
 from ..statistics import ConditionCounts, create_8_condition_summary_page
 
 __all__ = ["generate_pdf"]
+
+# Minimum grid-page count before parallel rendering is worth the Windows
+# process-pool spawn overhead (~7 s). See _render_all_grid_pages.
+_PDF_PARALLEL_MIN_PAGES = 8
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +118,15 @@ def generate_pdf(
             save_png_path=_page_png_path(
                 page_png_dir, display_counter, "8_condition_distribution"),
         )
+        # Overview charts on the front pages (same as the GUI Scatter/Histogram
+        # tabs). pdf_page_idx counts summary pages; the 8-condition page added
+        # one, so these land right after it.
+        bookmarks.append(("Threshold Scatter", pdf_page_idx + 1))
+        display_counter = _add_scatter_page(
+            pdf, data, config, base_name, display_counter, page_png_dir)
+        bookmarks.append(("Value Histogram", pdf_page_idx + 2))
+        display_counter = _add_histogram_page(
+            pdf, data, config, base_name, display_counter, page_png_dir)
     n_head = len(PdfReader(head_pdf).pages)
 
     # ── Build the per-lot grid-page jobs ────────────────────────────────────
@@ -170,7 +184,10 @@ def _render_all_grid_pages(grid_jobs, jobs, on_page) -> None:
     n_workers = (jobs if (jobs and jobs > 1) else (os.cpu_count() or 1))
     n_workers = max(1, min(n_workers, 8, total))
 
-    if want and n_workers > 1 and total >= 3:
+    # Each grid page renders 25 wafers (~1.25 s). Windows process-pool spawn
+    # costs ~7 s of fixed overhead (matplotlib re-import per worker), so parallel
+    # only pays off past ~8 pages (~200 wafers); below that, sequential is faster.
+    if want and n_workers > 1 and total >= _PDF_PARALLEL_MIN_PAGES:
         try:
             from concurrent.futures import ProcessPoolExecutor
             with ProcessPoolExecutor(max_workers=n_workers) as ex:
@@ -227,6 +244,46 @@ def _write_summary_text(
         pdf_page_idx    += 1
 
     return display_counter, pdf_page_idx
+
+
+def _add_scatter_page(pdf, data, config: PlotConfig, base_name: str,
+                      display_counter: int, page_png_dir: str | None) -> int:
+    """Write the overview Threshold Scatter as one landscape PDF page (+ PNG)."""
+    z = data["value"].to_numpy(dtype="float32", copy=False)
+    codes, names = wafer_codes_and_names(data)
+    fig, ax = plt.subplots(figsize=(11.69, 8.27))
+    try:
+        draw_scatter(ax, z, config, wafer_codes=codes, wafer_names=names,
+                     title=f"Threshold Scatter — {base_name}")
+        fig.text(0.98, 0.02, f"Page {display_counter}", fontsize=11,
+                 fontweight="bold", ha="right", va="bottom")
+        fig.tight_layout()
+        pdf.savefig(fig)
+        png = _page_png_path(page_png_dir, display_counter, "threshold_scatter")
+        if png:
+            fig.savefig(png, bbox_inches="tight", dpi=PAGE_PNG_DPI)
+    finally:
+        plt.close(fig)
+    return display_counter + 1
+
+
+def _add_histogram_page(pdf, data, config: PlotConfig, base_name: str,
+                        display_counter: int, page_png_dir: str | None) -> int:
+    """Write the overview value Histogram as one landscape PDF page (+ PNG)."""
+    z = data["value"].to_numpy(dtype="float32", copy=False)
+    fig, ax = plt.subplots(figsize=(11.69, 8.27))
+    try:
+        draw_histogram(ax, z, config, title=f"Value Histogram — {base_name}")
+        fig.text(0.98, 0.02, f"Page {display_counter}", fontsize=11,
+                 fontweight="bold", ha="right", va="bottom")
+        fig.tight_layout()
+        pdf.savefig(fig)
+        png = _page_png_path(page_png_dir, display_counter, "value_histogram")
+        if png:
+            fig.savefig(png, bbox_inches="tight", dpi=PAGE_PNG_DPI)
+    finally:
+        plt.close(fig)
+    return display_counter + 1
 
 
 def _add_page_header(fig, lot_id: str, base_name: str,
