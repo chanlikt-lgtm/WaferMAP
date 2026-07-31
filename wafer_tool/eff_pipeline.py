@@ -69,6 +69,7 @@ def process_eff(
     out_dir: str,
     *,
     scan: EffScan | None = None,
+    filters: dict[int, tuple[float, float]] | None = None,
     progress: ProgressCallback | None = None,
     on_wafer_ready: WaferReadyCallback | None = None,
     on_param_done: ParamDoneCallback | None = None,
@@ -103,7 +104,7 @@ def process_eff(
         _emit(min(pct, extract_cap), None, f"Reading EFF… {done:,} / {total:,} rows")
 
     extracted = extract_parameters(
-        eff_path, indices, out_dir, scan=scan,
+        eff_path, indices, out_dir, scan=scan, filters=filters,
         progress_cb=_extract_progress, stop_cb=stop_cb,
     )
     _check_cancel()

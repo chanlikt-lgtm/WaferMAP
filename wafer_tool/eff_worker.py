@@ -44,6 +44,7 @@ class EffReportWorker(QThread):
         config: PlotConfig,
         out_dir: str,
         scan: EffScan | None = None,
+        filters: dict[int, tuple[float, float]] | None = None,
         parent=None,
     ) -> None:
         super().__init__(parent)
@@ -52,6 +53,7 @@ class EffReportWorker(QThread):
         self._config = config
         self._out_dir = out_dir
         self._scan = scan
+        self._filters = filters
         self._cancel_evt = threading.Event()
 
     # ── public ──────────────────────────────────────────────────────────────
@@ -71,6 +73,7 @@ class EffReportWorker(QThread):
                 self._config,
                 self._out_dir,
                 scan=self._scan,
+                filters=self._filters,
                 progress=self._on_progress,
                 on_wafer_ready=self._on_wafer,
                 on_param_done=self.param_done.emit,
@@ -114,6 +117,7 @@ class EffPreviewWorker(QThread):
 
     def __init__(self, eff_path: str, index: int, name: str,
                  scan: EffScan | None = None, max_rows: int | None = None,
+                 value_range: tuple[float, float] | None = None,
                  parent=None) -> None:
         super().__init__(parent)
         self._eff_path = eff_path
@@ -121,6 +125,7 @@ class EffPreviewWorker(QThread):
         self._name = name
         self._scan = scan
         self._max_rows = max_rows
+        self._value_range = value_range
         self._cancel_evt = threading.Event()
 
     def cancel(self) -> None:
@@ -130,7 +135,8 @@ class EffPreviewWorker(QThread):
         try:
             df = extract_single_param_df(
                 self._eff_path, self._index, scan=self._scan,
-                max_rows=self._max_rows, stop_cb=self._cancel_evt.is_set,
+                max_rows=self._max_rows, value_range=self._value_range,
+                stop_cb=self._cancel_evt.is_set,
             )
             if not self._cancel_evt.is_set():
                 self.ready.emit(df, self._index)

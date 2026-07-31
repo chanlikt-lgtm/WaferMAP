@@ -86,6 +86,21 @@ def _run_eff_job(job, input_file, config, log_line) -> tuple[str, str | None, st
             f"no matching parameters to map in {os.path.basename(input_file)} "
             f"(requested: {job.eff_params or 'all'})")
 
+    # Rebuild the index-keyed value filter from the name-keyed job field, using
+    # this file's parameter names (folder-mode may pick a different newest file).
+    filters: dict[int, tuple[float, float]] = {}
+    if job.eff_filters:
+        name_to_index: dict[str, int] = {}
+        for p in scan.parameters:
+            name_to_index.setdefault(p.name, p.index)
+        for nm, rng in job.eff_filters.items():
+            if nm in name_to_index and rng and len(rng) == 2:
+                lo, hi = float(rng[0]), float(rng[1])
+                if lo < hi:
+                    filters[name_to_index[nm]] = (lo, hi)
+        if filters:
+            log_line(f"value filter active on {len(filters)} parameter(s)")
+
     which = "all parameters" if not job.eff_params else f"{len(indices)} parameter(s)"
     log_line(f"EFF job: {os.path.basename(input_file)} -> {which}")
 
@@ -98,7 +113,7 @@ def _run_eff_job(job, input_file, config, log_line) -> tuple[str, str | None, st
             log_line(f"[{overall}%] {message}")
 
     results = process_eff(input_file, indices, config, job.out_dir,
-                          scan=scan, progress=on_progress)
+                          scan=scan, filters=filters, progress=on_progress)
 
     log_line(f"Done: {len(results)} parameter folder(s) written under {job.out_dir}")
     for name, folder, pdf, pptx in results:

@@ -222,6 +222,7 @@ def extract_parameters(
     indices: list[int],
     out_base_dir: str | Path,
     scan: EffScan | None = None,
+    filters: dict[int, tuple[float, float]] | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
     stop_cb: Callable[[], bool] | None = None,
 ) -> list[ExtractedParameter]:
@@ -233,6 +234,10 @@ def extract_parameters(
     indices : column indices (``EffParameter.index``) to extract.  Must be >= 1.
     out_base_dir : root folder; each parameter gets ``<root>/<parameter>/``.
     scan : optional pre-computed :class:`EffScan` (avoids re-reading the header).
+    filters : optional ``{column_index: (min, max)}`` — dies whose value falls
+        outside a parameter's ``[min, max]`` are excluded from that parameter's
+        output (in addition to the always-on ``>= 1e10`` sentinel). Parameters
+        absent from the mapping are not filtered.
     progress_cb(rows_done, rows_total) : optional progress callback.  Raising
         from it (as the worker does on cancel) aborts the pass cleanly.
     stop_cb() -> bool : optional cooperative-cancel check.
@@ -310,6 +315,9 @@ def extract_parameters(
                         continue
                     if abs(val) >= _INVALID_MAGNITUDE:
                         continue
+                    rng = filters.get(idx) if filters else None
+                    if rng is not None and (val < rng[0] or val > rng[1]):
+                        continue    # outside this parameter's value filter
                     handles[idx].write(prefix + raw + "\n")
 
                 rows_done += 1
@@ -339,6 +347,7 @@ def extract_single_param_df(
     index: int,
     scan: EffScan | None = None,
     max_rows: int | None = None,
+    value_range: tuple[float, float] | None = None,
     stop_cb: Callable[[], bool] | None = None,
 ):
     """Read one parameter of an .eff into an in-memory DataFrame (no disk write).
@@ -386,6 +395,8 @@ def extract_single_param_df(
                 continue
             if abs(v) >= _INVALID_MAGNITUDE:
                 continue
+            if value_range is not None and (v < value_range[0] or v > value_range[1]):
+                continue    # outside the value filter — mirror extract_parameters
             lot = row[coord["lot"]]
             if not lot:
                 continue

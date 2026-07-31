@@ -45,6 +45,10 @@ class WaferJob:
     # output folder). Empty list means "every parameter in the file", the
     # automation-friendly default. Ignored for txt/csv jobs.
     eff_params: list[str] = field(default_factory=list)
+    # Optional per-parameter value filter for raw-EFF jobs: parameter name ->
+    # [min, max]. Dies outside the range are excluded. Name-keyed so it survives
+    # re-scanning the newest file in folder mode. Empty means no filter.
+    eff_filters: dict[str, list[float]] = field(default_factory=dict)
 
     def plot_config_kwargs(self) -> dict:
         """The subset of fields that construct a PlotConfig."""
@@ -97,7 +101,7 @@ def load_job(path: str | Path) -> WaferJob:
     if data.get("format") != JOB_FORMAT:
         raise ValueError(f"not a {JOB_FORMAT} file: {path}")
     fields = ("input_file", "out_dir", *_PLOT_KEYS, "input_dir", "input_pattern",
-              "eff_params")
+              "eff_params", "eff_filters")
     missing = [f for f in ("out_dir", "t_low", "t_high") if f not in data]
     if missing:
         raise ValueError(f"job is missing required fields: {', '.join(missing)}")

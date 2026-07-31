@@ -765,6 +765,7 @@ class DataProcessorUI(QMainWindow):
         self._eff_preview_pos = 0     # which selected parameter is previewed
         self._preview_cache: dict[int, object] = {}  # param col index -> DataFrame
         self._chart_param_label = ""  # parameter name shown in chart titles
+        self._eff_filters: dict[int, tuple[float, float]] = {}  # col index -> (min,max)
         self._wafer_count  = 0
         self._total_wafers = 0
         self._loaded_values: np.ndarray | None = None  # value column only; full df freed after load
@@ -1089,6 +1090,7 @@ class DataProcessorUI(QMainWindow):
             self._eff_scan = None
             self._eff_indices = []
             self._eff_selected = []
+            self._eff_filters = {}
             self._cancel_preview_worker()
             self._preview_cache.clear()
             if hasattr(self, "_eff_preview_bar"):
@@ -1126,6 +1128,7 @@ class DataProcessorUI(QMainWindow):
         self._eff_scan    = scan
         self._eff_indices = dlg.selected_indices()
         self._eff_selected = dlg.selected_names()
+        self._eff_filters = dlg.selected_filters()   # {col index: (min, max)}
         self.file_edit.setText(path)
         # Folder-mode scheduled EFF jobs should match .eff drops, not .txt.
         self.pattern_edit.setText("*.eff")
@@ -1245,7 +1248,9 @@ class DataProcessorUI(QMainWindow):
         self._scatter_canvas._show_placeholder()
         self._loaded_values = None
         self._eff_preview_status.setText(f"loading {name}…")
-        worker = EffPreviewWorker(self._eff_scan.path, col_index, name, scan=self._eff_scan)
+        worker = EffPreviewWorker(self._eff_scan.path, col_index, name,
+                                  scan=self._eff_scan,
+                                  value_range=self._eff_filters.get(col_index))
         worker.ready.connect(self._on_eff_preview_ready)
         worker.failed.connect(self._on_eff_preview_failed)
         self._preview_worker = worker
@@ -1375,6 +1380,14 @@ class DataProcessorUI(QMainWindow):
         eff_params = list(self._eff_selected) if self._eff_mode else []
         if self._eff_mode and not eff_params:
             self._status("⚠  Select at least one EFF parameter first.", _RED); return None
+        # Persist the value filter name-keyed so a scheduled/newest-file run can
+        # re-map it onto whatever parameters the latest .eff contains.
+        eff_filters: dict[str, list[float]] = {}
+        if self._eff_mode and self._eff_filters and self._eff_scan:
+            for idx, (mn, mx) in self._eff_filters.items():
+                param = self._eff_scan.parameter_by_index(idx)
+                if param is not None:
+                    eff_filters[param.name] = [mn, mx]
         # Folder mode: record the file's folder + pattern so each scheduled run
         # picks the newest matching file instead of this exact one.
         default_pattern = "*.eff" if self._eff_mode else "*.txt"
@@ -1387,7 +1400,7 @@ class DataProcessorUI(QMainWindow):
             use_log=self.log_chk.isChecked(), high_is_green=self.hig_chk.isChecked(),
             mirror_x=self.mirx_chk.isChecked(), mirror_y=self.miry_chk.isChecked(),
             rot_deg=rot_deg, input_dir=input_dir, input_pattern=pattern,
-            eff_params=eff_params,
+            eff_params=eff_params, eff_filters=eff_filters,
         )
 
     def _save_job(self) -> None:
@@ -1518,7 +1531,7 @@ class DataProcessorUI(QMainWindow):
             self._worker = None
         self._worker = EffReportWorker(
             self._eff_scan.path, self._eff_indices, config, out,
-            scan=self._eff_scan,
+            scan=self._eff_scan, filters=self._eff_filters,
         )
         self._worker.progress.connect(self.overall_bar.setValue)
         self._worker.wafer_progress.connect(self.wafer_bar.setValue)

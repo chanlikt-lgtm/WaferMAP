@@ -288,6 +288,9 @@ can be replayed offline. Beyond the \code{PlotConfig} fields it stores:
 \code{out\_dir} & Output directory.\\
 \code{eff\_params} & For raw \code{.eff}: the parameter names to map (one folder
   each). Empty means ``all parameters''.\\
+\code{eff\_filters} & Optional per-parameter value filter: parameter name
+  $\to [\min, \max]$. Name-keyed so a folder-mode job re-maps it onto the newest
+  file. Empty means no filter.\\
 \bottomrule
 \end{longtable}
 
@@ -359,10 +362,24 @@ Progress is reported as \code{(overall\_pct, wafer\_pct, message)}; cancellation
 is an \code{EffCancelled} exception (converted to a \code{RuntimeError} inside the
 \code{generate\_report} call so the render aborts cleanly).
 
+\section{Per-parameter value filter}
+Extraction accepts an optional \code{filters} mapping
+(\code{\{column\_index: (min, max)\}}); a die whose value falls outside a
+parameter's range is excluded from that parameter's output --- alongside the
+always-on $|v|\ge 10^{10}$ sentinel. The parameter picker defaults every
+row to a universal $\pm1000$ range (matching the standalone eff-converter),
+editable per parameter, and the whole filter can be switched off. The same range
+is applied to the preview reader, so the preview matches the exported map die for
+die. The filter controls \emph{inclusion}; it is independent of the colour
+thresholds (Limit\,1 / Limit\,2), which only control zone colouring. For
+scheduled jobs the ranges are persisted name-keyed in \code{eff\_filters} and
+re-mapped onto whatever parameters the newest file contains.
+
 \section{In-memory preview reader}
 \code{extract\_single\_param\_df} reads exactly one parameter into a DataFrame
 without touching disk. The GUI uses it (on a background thread) to draw the
-scatter/histogram preview for the currently-selected parameter.
+scatter/histogram preview for the currently-selected parameter, honouring the
+value filter above.
 
 % ===========================================================================
 \chapter{Rendering Internals}\label{ch:render}
