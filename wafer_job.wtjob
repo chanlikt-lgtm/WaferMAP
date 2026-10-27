@@ -1,0 +1,23 @@
+{
+  "format": "wafer-tool-job",
+  "version": 1,
+  "created": "2026-08-04T12:59:54",
+  "input_file": "//e2asia12.intra.infineon.com/eSquare_user/ananthanbala_infineon/delivery/PFET2 Weekly Trend-retprob-2026-08-03-020111-318.eff",
+  "out_dir": "C:\\Users\\tancha/Desktop/wafer_output",
+  "t_low": 0.1,
+  "t_high": 2.0,
+  "use_log": true,
+  "high_is_green": true,
+  "mirror_x": false,
+  "mirror_y": false,
+  "rot_deg": 0,
+  "input_dir": "",
+  "input_pattern": "*.eff",
+  "eff_params": [
+    "QBD_D__CK"
+  ],
+  "eff_filter_min": -100.0,
+  "eff_filter_max": 100.0,
+  "email_to": [],
+  "email_enabled": false
+}

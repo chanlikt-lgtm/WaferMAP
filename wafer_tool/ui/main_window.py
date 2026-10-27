@@ -34,16 +34,18 @@ from PyQt6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
     QFrame, QGridLayout, QGroupBox, QHBoxLayout, QLabel, QLineEdit,
     QMainWindow, QMessageBox, QProgressBar, QPushButton, QRadioButton, QButtonGroup,
-    QSizePolicy, QSpacerItem, QSplitter, QStatusBar,
+    QScrollArea, QSizePolicy, QSpacerItem, QSplitter, QStatusBar,
     QTabWidget, QVBoxLayout, QWidget,
 )
 
 from wafer_tool.config import PlotConfig
 from wafer_tool.data_loader import read_wafer_data
+from ..logger import log_run
 from ..worker import ReportWorker
 from ..eff_loader import scan_eff, EffScanError
 from ..eff_worker import EffReportWorker, EffPreviewWorker
 from .eff_param_dialog import EffParameterDialog
+from .email_recipients_dialog import EmailRecipientsDialog
 from .histogram_widget import HistogramWidget
 
 
@@ -761,6 +763,8 @@ class DataProcessorUI(QMainWindow):
         self._eff_scan = None
         self._eff_indices: list[int] = []
         self._eff_selected: list[str] = []
+        self._eff_filter_min: float | None = None   # global value filter (min)
+        self._eff_filter_max: float | None = None   # global value filter (max)
         self._preview_worker = None   # background EFF single-parameter preview
         self._eff_preview_pos = 0     # which selected parameter is previewed
         self._preview_cache: dict[int, object] = {}  # param col index -> DataFrame
@@ -798,15 +802,29 @@ class DataProcessorUI(QMainWindow):
     # ── LEFT panel ────────────────────────────────────────────────────────
 
     def _build_left(self) -> QWidget:
-        w = QWidget(); w.setMaximumWidth(400)
+        # Settings groups go in a scroll area so a short window never squeezes
+        # controls (e.g. Rotation / Mirror) below their natural size.
+        w = QWidget()
         v = QVBoxLayout(w); v.setContentsMargins(0,0,0,0); v.setSpacing(8)
         v.addWidget(self._grp_file())
         v.addWidget(self._grp_thresh())
         v.addWidget(self._grp_opts())
         v.addWidget(self._grp_outdir())
-        v.addSpacerItem(QSpacerItem(0,0,QSizePolicy.Policy.Minimum,QSizePolicy.Policy.Expanding))
-        v.addWidget(self._grp_run())
-        return w
+        v.addStretch(1)
+        scroll = QScrollArea()
+        scroll.setWidget(w)
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        # Generate / Cancel / Email / Save Job / Schedule stay PINNED below the
+        # scroll area so they are always visible even on a short window — only
+        # the settings above scroll.
+        panel = QWidget(); panel.setMaximumWidth(400)
+        pv = QVBoxLayout(panel); pv.setContentsMargins(0,0,0,0); pv.setSpacing(8)
+        pv.addWidget(scroll, 1)
+        pv.addWidget(self._grp_run())
+        return panel
 
     def _grp_file(self) -> QGroupBox:
         b = QGroupBox("Input File"); g = QGridLayout(b); g.setSpacing(6)
@@ -866,6 +884,48 @@ class DataProcessorUI(QMainWindow):
         chk_row.addWidget(self.log_chk); chk_row.addWidget(self.hig_chk)
         outer.addLayout(chk_row)
 
+        # Wafer-map gap handling: grey "no data" vs blank, and interpolate vs extrapolate.
+        self.grey_chk = QCheckBox("Show missing data in grey")
+        self.grey_chk.setChecked(True)
+        self.grey_chk.setToolTip(
+            "Die areas with no nearby measurement are drawn grey (No data). "
+            "Unticked, they are left blank/white. No effect when Extrapolate is on.")
+        outer.addWidget(self.grey_chk)
+        fill_row = QHBoxLayout()
+        fill_row.addWidget(_L("Gap fill:", muted=True))
+        self._fill_group = QButtonGroup(self)
+        rb_interp = QRadioButton("Interpolate"); rb_interp.setChecked(True)
+        rb_extrap = QRadioButton("Extrapolate")
+        rb_interp.setToolTip("Fill only within a few chips of a measured die; "
+                             "farther areas are treated as no data.")
+        rb_extrap.setToolTip("Nearest-neighbour fill the whole wafer disc "
+                             "(no missing areas).")
+        self._fill_group.addButton(rb_interp, 0)
+        self._fill_group.addButton(rb_extrap, 1)
+        # Grey only affects interpolate mode; disable it under Extrapolate (audit CHK-0415).
+        self._fill_group.idClicked.connect(lambda i: self.grey_chk.setEnabled(i == 0))
+        fill_row.addWidget(rb_interp); fill_row.addWidget(rb_extrap); fill_row.addStretch(1)
+        outer.addLayout(fill_row)
+
+        # Value filter for TXT / CSV / Excel imports (.eff uses its own dialog filter).
+        vf = QHBoxLayout()
+        self._vfilter_chk = QCheckBox("Value filter (drop outside)")
+        self._vfilter_chk.setToolTip(
+            "When loading a TXT / CSV / Excel file, drop measurement values outside "
+            "[Min, Max]. Raw .eff files use the filter in their parameter dialog instead.")
+        self._vmin_edit = QLineEdit(); self._vmin_edit.setPlaceholderText("Min")
+        self._vmin_edit.setFixedWidth(78); self._vmin_edit.setEnabled(False)
+        self._vmax_edit = QLineEdit(); self._vmax_edit.setPlaceholderText("Max")
+        self._vmax_edit.setFixedWidth(78); self._vmax_edit.setEnabled(False)
+        self._vfilter_chk.toggled.connect(self._vmin_edit.setEnabled)
+        self._vfilter_chk.toggled.connect(self._vmax_edit.setEnabled)
+        vf.addWidget(self._vfilter_chk)
+        vf.addWidget(QLabel("Min:")); vf.addWidget(self._vmin_edit)
+        vf.addWidget(QLabel("Max:")); vf.addWidget(self._vmax_edit)
+        vf.addStretch(1)
+        self._vfilter_row = QWidget(); self._vfilter_row.setLayout(vf)
+        outer.addWidget(self._vfilter_row)
+
         outer.addWidget(_sep())
 
         # Orientation area: radio buttons + mirror + wafer diagram side by side
@@ -916,6 +976,48 @@ class DataProcessorUI(QMainWindow):
         self.cancel_btn.setObjectName("cancel_btn")
         self.cancel_btn.setEnabled(False)
         v.addWidget(self.run_btn); v.addWidget(self.cancel_btn)
+
+        # ── Email recipients: saved into the job so a finished run (including
+        # a scheduled one) mails links to the chosen outputs. ──────────────
+        self.email_chk = QCheckBox("✉  Email report links when done")
+        self.email_chk.setToolTip(
+            "When checked, finishing this job — including a scheduled run — emails "
+            "the recipients below links to the outputs ticked here.")
+        # Recipients live in a popup table (multiple addresses); a read-only
+        # summary shows them here.
+        self._email_recipients: list[str] = []
+        rec_row = QHBoxLayout(); rec_row.setSpacing(6)
+        self.email_summary = QLineEdit()
+        self.email_summary.setReadOnly(True)
+        self.email_summary.setPlaceholderText("No recipients — click Recipients…")
+        self.email_btn = QPushButton("Recipients…")
+        self.email_btn.setEnabled(False)
+        self.email_btn.clicked.connect(self._edit_recipients)
+        rec_row.addWidget(self.email_summary, 1)
+        rec_row.addWidget(self.email_btn)
+        v.addWidget(self.email_chk)
+        v.addLayout(rec_row)
+
+        # Which links the email includes (all on by default).
+        link_row = QHBoxLayout(); link_row.setSpacing(10)
+        link_row.addWidget(QLabel("Include:"))
+        self.email_pdf_chk = QCheckBox("PDF"); self.email_pdf_chk.setChecked(True)
+        self.email_pptx_chk = QCheckBox("PPTX"); self.email_pptx_chk.setChecked(True)
+        self.email_folder_chk = QCheckBox("Folder (all files)")
+        self.email_folder_chk.setChecked(True)
+        for c in (self.email_pdf_chk, self.email_pptx_chk, self.email_folder_chk):
+            c.setEnabled(False)
+            link_row.addWidget(c)
+        link_row.addStretch(1)
+        v.addLayout(link_row)
+
+        # The recipients button and link checkboxes follow the master switch.
+        def _email_toggled(on: bool) -> None:
+            self.email_btn.setEnabled(on)
+            for c in (self.email_pdf_chk, self.email_pptx_chk,
+                      self.email_folder_chk):
+                c.setEnabled(on)
+        self.email_chk.toggled.connect(_email_toggled)
 
         # ── Automation: save this run as a job, or schedule saved jobs ──────
         auto_row = QHBoxLayout(); auto_row.setSpacing(6)
@@ -1078,8 +1180,8 @@ class DataProcessorUI(QMainWindow):
     def _browse_file(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Select data file", "",
-            "Wafer data (*.eff *.csv *.txt *.dat);;EFF extraction (*.eff);;"
-            "Text / CSV (*.csv *.txt *.dat);;All files (*)"
+            "Wafer data (*.eff *.csv *.txt *.dat *.xlsx *.xls);;EFF extraction (*.eff);;"
+            "Text / CSV (*.csv *.txt *.dat);;Excel (*.xlsx *.xls);;All files (*)"
         )
         if not path: return
         if path.lower().endswith(".eff"):
@@ -1089,11 +1191,14 @@ class DataProcessorUI(QMainWindow):
             self._eff_scan = None
             self._eff_indices = []
             self._eff_selected = []
+            self._eff_filter_min = None
+            self._eff_filter_max = None
             self._cancel_preview_worker()
             self._preview_cache.clear()
             if hasattr(self, "_eff_preview_bar"):
                 self._eff_preview_bar.setVisible(False)
             self._param_name_lbl.setVisible(False)
+            self._vfilter_row.setVisible(True)
             if self.pattern_edit.text().strip() == "*.eff":
                 self.pattern_edit.setText("*.txt")
             self.file_edit.setText(path)
@@ -1126,9 +1231,11 @@ class DataProcessorUI(QMainWindow):
         self._eff_scan    = scan
         self._eff_indices = dlg.selected_indices()
         self._eff_selected = dlg.selected_names()
+        self._eff_filter_min, self._eff_filter_max = dlg.filter_range()
         self.file_edit.setText(path)
         # Folder-mode scheduled EFF jobs should match .eff drops, not .txt.
         self.pattern_edit.setText("*.eff")
+        self._vfilter_row.setVisible(False)
 
         rows_txt = f"~{scan.declared_rows:,} rows" if scan.declared_rows else "rows"
         self._file_info.setText(
@@ -1164,7 +1271,7 @@ class DataProcessorUI(QMainWindow):
             _GREEN,
         )
         # Kick off the first parameter's preview (background — never blocks UI).
-        self._eff_preview_goto(0)
+        self._eff_preview_goto(0, apply_limits=True)
 
     # ── EFF per-parameter preview navigation ─────────────────────────────────
 
@@ -1217,8 +1324,14 @@ class DataProcessorUI(QMainWindow):
         self._param_name_lbl.setText(f"Parameter:  {name}{suffix}")
         self._param_name_lbl.setVisible(True)
 
-    def _eff_preview_goto(self, pos: int) -> None:
-        """Show the scatter / histogram for the pos-th selected parameter."""
+    def _eff_preview_goto(self, pos: int, apply_limits: bool = False) -> None:
+        """Show the scatter / histogram for the pos-th selected parameter.
+
+        ``apply_limits`` seeds Limit 1 / Limit 2 from this parameter's spec
+        limits and is set only on the initial load — never on Prev/Next
+        navigation. A single global threshold applies to every parameter, so
+        paging must not overwrite the values the user has typed.
+        """
         if not self._eff_mode or not self._eff_selected:
             return
         pos = max(0, min(pos, len(self._eff_selected) - 1))
@@ -1231,8 +1344,14 @@ class DataProcessorUI(QMainWindow):
         col_index = self._eff_indices[pos]
         self._chart_param_label = name       # shown in scatter / histogram titles
 
-        # Refresh the threshold limits to this parameter's spec limits.
-        self._apply_param_limits(pos)
+        if apply_limits:
+            # Initial load only: seed the thresholds from this parameter's spec.
+            self._apply_param_limits(pos)
+        else:
+            # Navigation: show which parameter is previewed but leave the
+            # user's Limit 1 / Limit 2 untouched.
+            self._param_name_lbl.setText(f"Parameter:  {name}")
+            self._param_name_lbl.setVisible(True)
 
         cached = self._preview_cache.get(col_index)
         if cached is not None:                         # instant — no re-read
@@ -1245,7 +1364,10 @@ class DataProcessorUI(QMainWindow):
         self._scatter_canvas._show_placeholder()
         self._loaded_values = None
         self._eff_preview_status.setText(f"loading {name}…")
-        worker = EffPreviewWorker(self._eff_scan.path, col_index, name, scan=self._eff_scan)
+        worker = EffPreviewWorker(
+            self._eff_scan.path, col_index, name, scan=self._eff_scan,
+            filter_min=self._eff_filter_min, filter_max=self._eff_filter_max,
+        )
         worker.ready.connect(self._on_eff_preview_ready)
         worker.failed.connect(self._on_eff_preview_failed)
         self._preview_worker = worker
@@ -1382,13 +1504,56 @@ class DataProcessorUI(QMainWindow):
         if self.newest_chk.isChecked():
             input_dir = os.path.dirname(fp)
             pattern = self.pattern_edit.text().strip() or default_pattern
+        # Optional email recipients (comma/semicolon separated) saved with the
+        # Recipients come from the popup table; the checkbox is the master
+        # on/off switch.
+        email_to = list(self._email_recipients)
+        email_enabled = self.email_chk.isChecked()
+        if email_enabled and not email_to:
+            self._status("⚠  Add at least one email recipient, or uncheck email.",
+                         _RED); return None
+        # Value filter: .eff uses its dialog filter; TXT/CSV/Excel use the Options filter.
+        if self._eff_mode:
+            vf_min, vf_max = self._eff_filter_min, self._eff_filter_max
+        else:
+            vf_min = vf_max = None
+            if self._vfilter_chk.isChecked():
+                try:
+                    _s1, _s2 = self._vmin_edit.text().strip(), self._vmax_edit.text().strip()
+                    vf_min = float(_s1) if _s1 else None
+                    vf_max = float(_s2) if _s2 else None
+                except ValueError:
+                    vf_min = vf_max = None
         return WaferJob(
             input_file=fp, out_dir=out, t_low=t_low, t_high=t_high,
             use_log=self.log_chk.isChecked(), high_is_green=self.hig_chk.isChecked(),
             mirror_x=self.mirx_chk.isChecked(), mirror_y=self.miry_chk.isChecked(),
             rot_deg=rot_deg, input_dir=input_dir, input_pattern=pattern,
             eff_params=eff_params,
+            eff_filter_min=vf_min,
+            eff_filter_max=vf_max,
+            email_to=email_to, email_enabled=email_enabled,
+            email_pdf=self.email_pdf_chk.isChecked(),
+            email_pptx=self.email_pptx_chk.isChecked(),
+            email_folder=self.email_folder_chk.isChecked(),
+            show_missing_grey=self.grey_chk.isChecked(),
+            extrapolate=self._fill_group.checkedId() == 1,
         )
+
+    def _edit_recipients(self) -> None:
+        """Open the popup table to add/remove multiple email recipients."""
+        dlg = EmailRecipientsDialog(self._email_recipients, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            self._email_recipients = dlg.recipients()
+            self._update_email_summary()
+
+    def _update_email_summary(self) -> None:
+        n = len(self._email_recipients)
+        self.email_summary.setText(
+            "" if n == 0 else
+            (self._email_recipients[0] if n == 1
+             else f"{self._email_recipients[0]}  (+{n - 1} more)"))
+        self.email_summary.setToolTip("\n".join(self._email_recipients))
 
     def _save_job(self) -> None:
         """Save the current run as a .wtjob, then offer to open the scheduler."""
@@ -1396,6 +1561,18 @@ class DataProcessorUI(QMainWindow):
         job = self._gather_job()
         if job is None:
             return
+        # Pre-check input + output so the user can correct before saving.
+        problems = job.precheck()
+        if problems:
+            bullets = "\n  • ".join(problems)
+            ret = QMessageBox.question(
+                self, "Check job",
+                f"This job may not run:\n\n  • {bullets}\n\nSave anyway?",
+                QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel)
+            if ret != QMessageBox.StandardButton.Save:
+                self._status("⚠  Fix the input / output path, or save anyway.", _YELLOW)
+                return
         path, _ = QFileDialog.getSaveFileName(
             self, "Save Job", "wafer_job" + JOB_SUFFIX, f"Wafer Job (*{JOB_SUFFIX})")
         if not path:
@@ -1431,7 +1608,10 @@ class DataProcessorUI(QMainWindow):
         t_low, t_high = self.t_low_edit.value(), self.t_high_edit.value()
         if t_low == t_high:
             return self._status("⚠  Limit 1 and Limit 2 must differ.", _RED)
-        os.makedirs(out, exist_ok=True)
+        try:
+            os.makedirs(out, exist_ok=True)
+        except OSError as exc:
+            return self._status(f"⚠  Cannot create output folder: {exc}", _RED)
         rot_deg = [0, 90, 180, 270][self._rot_group.checkedId()]
         try:
             config = PlotConfig(
@@ -1441,9 +1621,25 @@ class DataProcessorUI(QMainWindow):
                 mirror_x=self.mirx_chk.isChecked(),
                 mirror_y=self.miry_chk.isChecked(),
                 rot_deg=rot_deg,
+                show_missing_grey=self.grey_chk.isChecked(),
+                extrapolate=self._fill_group.checkedId() == 1,
             )
         except ValueError as exc:
             return self._status(f"⚠  {exc}", _RED)
+
+        # Value filter (TXT / CSV / Excel)
+        fmin = fmax = None
+        if self._vfilter_chk.isChecked():
+            smin, smax = self._vmin_edit.text().strip(), self._vmax_edit.text().strip()
+            try:
+                fmin = float(smin) if smin else None
+                fmax = float(smax) if smax else None
+            except ValueError:
+                return self._status("⚠  Invalid value-filter Min/Max.", _RED)
+            if fmin is None and fmax is None:
+                return self._status("⚠  Enter a Min and/or Max, or untick the value filter.", _RED)
+            if fmin is not None and fmax is not None and fmin >= fmax:
+                return self._status("⚠  Value-filter Min must be less than Max.", _RED)
 
         # Reset state — grid clears, both bars reset, pause lifted
         self._wafer_count  = 0
@@ -1463,7 +1659,7 @@ class DataProcessorUI(QMainWindow):
         if self._worker is not None:        # stale worker (shouldn't happen, safety net)
             self._worker.deleteLater()
             self._worker = None
-        self._worker = ReportWorker(fp, config, out)
+        self._worker = ReportWorker(fp, config, out, filter_min=fmin, filter_max=fmax)
         self._worker.progress.connect(self.overall_bar.setValue)
         self._worker.wafer_progress.connect(self.wafer_bar.setValue)
         self._worker.status_message.connect(self._on_msg)
@@ -1484,7 +1680,26 @@ class DataProcessorUI(QMainWindow):
         t_low, t_high = self.t_low_edit.value(), self.t_high_edit.value()
         if t_low == t_high:
             return self._status("⚠  Limit 1 and Limit 2 must differ.", _RED)
-        os.makedirs(out, exist_ok=True)
+        try:
+            os.makedirs(out, exist_ok=True)
+        except OSError as exc:
+            return self._status(f"⚠  Cannot create output folder: {exc}", _RED)
+        # Warn (GUI only) if this exact .eff (same size + date) was already
+        # generated into this folder. Automation runs unconditionally.
+        try:
+            from ..eff_loader import eff_already_processed
+            if eff_already_processed(self._eff_scan.path, out):
+                ret = QMessageBox.question(
+                    self, "Already generated",
+                    f"'{os.path.basename(self._eff_scan.path)}' looks unchanged "
+                    "(same size and date) and was already generated into this "
+                    "output folder.\n\nGenerate again anyway?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No)
+                if ret != QMessageBox.StandardButton.Yes:
+                    return self._status("Skipped — already generated.", _YELLOW)
+        except Exception:
+            pass
         rot_deg = [0, 90, 180, 270][self._rot_group.checkedId()]
         try:
             config = PlotConfig(
@@ -1494,6 +1709,8 @@ class DataProcessorUI(QMainWindow):
                 mirror_x=self.mirx_chk.isChecked(),
                 mirror_y=self.miry_chk.isChecked(),
                 rot_deg=rot_deg,
+                show_missing_grey=self.grey_chk.isChecked(),
+                extrapolate=self._fill_group.checkedId() == 1,
             )
         except ValueError as exc:
             return self._status(f"⚠  {exc}", _RED)
@@ -1519,6 +1736,7 @@ class DataProcessorUI(QMainWindow):
         self._worker = EffReportWorker(
             self._eff_scan.path, self._eff_indices, config, out,
             scan=self._eff_scan,
+            filter_min=self._eff_filter_min, filter_max=self._eff_filter_max,
         )
         self._worker.progress.connect(self.overall_bar.setValue)
         self._worker.wafer_progress.connect(self.wafer_bar.setValue)
@@ -1590,6 +1808,10 @@ class DataProcessorUI(QMainWindow):
             lines.append("⚠  PPTX: not generated — run:  py -m pip install python-pptx")
         self._status("\n".join(lines), _GREEN)
         self.out_path_lbl.setText(self.out_edit.text().strip())
+        log_run(source="gui", status="OK", input=self.file_edit.text().strip(),
+                out_dir=self.out_edit.text().strip(), detail="txt", message=pdf)
+        label = os.path.splitext(os.path.basename(self.file_edit.text().strip()))[0]
+        self._maybe_email([(label, pdf, pptx, self.out_edit.text().strip())])
         self.open_btn.setEnabled(True); self._reset()
         import gc; gc.collect()  # free matplotlib figure cache from render loop
 
@@ -1610,8 +1832,51 @@ class DataProcessorUI(QMainWindow):
             lines.append(f"   … and {n - 12} more")
         self._status("\n".join(lines), _GREEN)
         self.out_path_lbl.setText(self.out_edit.text().strip())
+        eff_in = self._eff_scan.path if self._eff_scan else self.file_edit.text().strip()
+        log_run(source="gui", status="OK", input=eff_in,
+                out_dir=self.out_edit.text().strip(),
+                detail=f"eff:{','.join(self._eff_selected) or 'all'}",
+                message=f"{n} parameter folder(s)")
+        # Remember this run so an unchanged re-run can warn the user next time.
+        try:
+            from ..eff_loader import record_eff_run
+            record_eff_run(eff_in, self.out_edit.text().strip(),
+                           [folder for _n, folder, _p, _q in results])
+        except Exception:
+            pass
+        self._maybe_email([(name, pdf, pptx, folder)
+                           for name, folder, pdf, pptx in results])
         self.open_btn.setEnabled(True); self._reset()
         import gc; gc.collect()
+
+    def _maybe_email(self, reports_raw: list) -> None:
+        """After a GUI run, email links if the email checkbox is on. Mirrors the
+        headless runner. ``reports_raw`` is a list of (label, pdf, pptx, folder);
+        each link is included only if its checkbox is ticked."""
+        if not self.email_chk.isChecked() or not self._email_recipients:
+            return
+        try:
+            from wafer_tool.automation.notify import (
+                Report, EmailNotConfigured, send_report_email)
+        except Exception as exc:  # pragma: no cover - defensive import guard
+            self._status(f"⚠  Email module unavailable: {exc}", _YELLOW)
+            return
+        reports = [
+            Report(label=label,
+                   pdf=pdf if self.email_pdf_chk.isChecked() else "",
+                   pptx=pptx if self.email_pptx_chk.isChecked() else "",
+                   folder=folder if self.email_folder_chk.isChecked() else "")
+            for (label, pdf, pptx, folder) in reports_raw]
+        first = reports[0].label if reports else "report"
+        extra = f" (+{len(reports) - 1} more)" if len(reports) > 1 else ""
+        subject = f"Wafer report ready: {first}{extra}"
+        try:
+            send_report_email(self._email_recipients, subject, reports)
+            self._sb.setText(f"Email sent to {', '.join(self._email_recipients)}")
+        except EmailNotConfigured as exc:
+            self._status(f"⚠  Report done, but email not configured: {exc}", _YELLOW)
+        except Exception as exc:  # noqa: BLE001 - never let email fail the run
+            self._status(f"⚠  Report done, but email not sent: {exc}", _YELLOW)
 
     def _on_err(self, msg: str) -> None:
         if msg == "Cancelled by user.":
@@ -1620,6 +1885,12 @@ class DataProcessorUI(QMainWindow):
         else:
             self._status(f"✗  {msg}", _RED)
             self._sb.setText(f"Error: {msg}")
+        log_run(source="gui",
+                status="CANCELLED" if msg == "Cancelled by user." else "ERROR",
+                input=(self._eff_scan.path if self._eff_mode and self._eff_scan
+                       else self.file_edit.text().strip()),
+                out_dir=self.out_edit.text().strip(),
+                detail="eff" if self._eff_mode else "txt", message=msg)
         self._reset()
 
     # ─────────────────────────────────────────────────────────────────────

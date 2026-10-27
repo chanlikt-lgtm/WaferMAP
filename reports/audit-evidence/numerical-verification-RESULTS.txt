@@ -1,0 +1,9 @@
+Numerical verification (addresses audit F-04, F-09, F-11, INV-03, INV-05) — 7/7 PASS
+  CHK-0401 planar field z=2x+3y+10 interpolated exactly inside hull (max_abs_err 3.81e-06)
+  CHK-0402 constant field z=50 stays 50 everywhere
+  CHK-0406 far_from_data_mask: <4 pitches = near, >4 = far (exact)
+  CHK-0403 <4 points rejected (no fabricated surface); >=4 drawn
+  CHK-0408 raw df values unmutated by rendering (extrapolate/colour toggles)
+  CHK-0413 log scale with all-zero / negative data: no crash
+  INV-03   8-condition statistics identical when only high_is_green flips
+Script: 03-renderer/test_numeric_verification.py   (run: python -I test_numeric_verification.py)

@@ -41,7 +41,7 @@ import matplotlib.pyplot as plt
 from .config import PlotConfig, WAFER_PNG_DPI_UNIFORM, WAFER_PNG_DPI_MULTIZONE
 from .data_loader import read_wafer_data
 from .logger import log, log_exception
-from .plotting import draw_wafer_ax
+from .plotting import draw_wafer_ax, lot_die_sites
 from .statistics import calculate_8_condition_statistics
 from .exporters.pdf_exporter import generate_pdf
 from .exporters.csv_exporter import export_color_summary_csv
@@ -62,6 +62,10 @@ def generate_report(
     on_wafer_ready: WaferReadyCallback | None = None,
     render_individual_pngs: bool | None = None,
     jobs: int | None = None,
+    empty_wafers: list[tuple[str, str]] | None = None,
+    extra_sites: dict[str, list[tuple[float, float]]] | None = None,
+    filter_min: float | None = None,
+    filter_max: float | None = None,
 ) -> tuple[str, str | None, str]:
     """
     End-to-end report pipeline.
@@ -80,6 +84,11 @@ def generate_report(
     on_wafer_ready : callable(lot_id, wafer_id, png_path), optional
         Called immediately after each wafer PNG is written to disk, allowing
         the UI to display a live preview without waiting for the full report.
+    empty_wafers : list of (lot, wafer), optional
+        Wafers with no rows left after a value filter; shown as placeholders.
+    extra_sites : dict lot -> [(x, y), ...], optional
+        Die positions removed before loading (e.g. by a value filter); they
+        still count toward the lot's wafer outline size.
 
     Returns
     -------
@@ -95,7 +104,7 @@ def generate_report(
         If the data file cannot be read or produces no valid rows.
     """
     # ── Load data ─────────────────────────────────────────────────────────
-    data = read_wafer_data(filepath)
+    data = read_wafer_data(filepath, filter_min=filter_min, filter_max=filter_max)
     if data is None or data.empty:
         raise ValueError(f"Failed to read or parse data from: {filepath}")
 
@@ -135,6 +144,7 @@ def generate_report(
             on_progress=on_progress,
             on_wafer_ready=on_wafer_ready,
             jobs=jobs,
+            extra_sites=extra_sites,
         )
         gc.collect()  # release matplotlib figure cache accumulated during render loop
     elif HAS_PPTX:
@@ -155,6 +165,8 @@ def generate_report(
         timestamp=timestamp,
         page_png_dir=pptx_page_dir if HAS_PPTX else None,
         jobs=jobs,
+        empty_wafers=empty_wafers,
+        extra_sites=extra_sites,
         on_page=lambda d, t: _emit(on_progress, current_step, total_steps,
                                    f"Generating PDF… page {d}/{t}"),
     )
@@ -218,7 +230,7 @@ def _zone_count(sub, config: PlotConfig) -> int:
 def _render_one_wafer_png(job: tuple) -> tuple:
     """Render ONE wafer's square archive PNG. Top-level + picklable so it can
     run in a spawned worker process. Returns (lot_id, wafer_id, path, valid)."""
-    lot_id, wid, out_path, config, sub = job
+    lot_id, wid, out_path, config, sub, lot_sites = job
 
     import matplotlib
     matplotlib.use("Agg")
@@ -235,7 +247,8 @@ def _render_one_wafer_png(job: tuple) -> tuple:
         fig, ax = _plt.subplots(figsize=(8, 8), dpi=100)
         fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
         valid = draw_wafer_ax(ax, sub, wid, config,
-                              show_legend=False, show_title=False)
+                              show_legend=False, show_title=False,
+                              lot_sites=lot_sites)
         if valid:
             fig.savefig(out_path, bbox_inches="tight", pad_inches=0, dpi=dpi)
     except Exception:
@@ -254,6 +267,7 @@ def _render_wafer_pngs(
     on_progress: ProgressCallback | None,
     on_wafer_ready: WaferReadyCallback | None,
     jobs: int | None = None,
+    extra_sites: dict[str, list[tuple[float, float]]] | None = None,
 ) -> None:
     """
     Render one square archive PNG per valid wafer.
@@ -271,11 +285,14 @@ def _render_wafer_pngs(
     # index dragged along).
     render_jobs: list[tuple] = []
     for lot_id, lot_df in data.groupby("lot"):
+        if lot_df.empty:
+            continue
+        sites = lot_die_sites(lot_df, (extra_sites or {}).get(str(lot_id)))
         for wid, w_df in lot_df.groupby("wafer"):
             filename = f"{lot_id}_{wid}{config.log_suffix}.png"
             sub = w_df[["x", "y", "value"]].copy()
             render_jobs.append(
-                (str(lot_id), str(wid), os.path.join(png_dir, filename), config, sub)
+                (str(lot_id), str(wid), os.path.join(png_dir, filename), config, sub, sites)
             )
 
     total = len(render_jobs)

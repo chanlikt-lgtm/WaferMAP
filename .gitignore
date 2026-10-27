@@ -32,3 +32,21 @@ temp_summary_images/
 # OS
 .DS_Store
 Thumbs.db
+
+# --- GitHub push (app only): exclude data, unrelated work, build junk ---
+EFF/
+*.eff
+*.log
+_exe_*.txt
+_g.txt
+# Unrelated physics project files (different work in the same folder)
+vbd_*
+jfet_*
+*.nb
+# LaTeX intermediates
+*.aux
+*.out
+*.toc
+
+# Office lock/temp files
+~$*

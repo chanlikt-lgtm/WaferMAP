@@ -21,6 +21,8 @@ def read_wafer_data(
     x_col: int = 1,
     y_col: int = 2,
     val_col: int = 3,
+    filter_min: float | None = None,
+    filter_max: float | None = None,
 ) -> pd.DataFrame:
 
     filepath = Path(filepath)
@@ -88,12 +90,15 @@ def read_wafer_data(
     # Free the intermediate series now that df owns the data.
     del lot_series, wafer_series, x_series, y_series, val_series
 
+    n_total = len(df)                        # rows read from the file
     df.dropna(inplace=True)
+    n_after_num = len(df)                    # after dropping unparseable x/y/value
 
     df = df[
         df["lot"].astype(str).str.len().gt(0) &
         df["wafer"].astype(str).str.len().gt(0)
     ]
+    n_after_id = len(df)                     # after dropping empty lot/wafer ids
 
     if df.empty:
         raise DataLoadError(
@@ -101,9 +106,35 @@ def read_wafer_data(
             "Check that the file format and column indices are correct."
         )
 
-    log.info("Loaded %d rows, %d wafers",
-             len(df), df.groupby(["lot", "wafer"]).ngroups)
-    return df.reset_index(drop=True)
+    # Optional inclusive value filter (drops out-of-range measurements), mirroring
+    # the .eff import filter so TXT / CSV / Excel can be filtered too.
+    if filter_min is not None:
+        df = df[df["value"] >= filter_min]
+    if filter_max is not None:
+        df = df[df["value"] <= filter_max]
+    if df.empty:
+        raise DataLoadError(
+            "No rows remain after the value filter — widen the Min/Max range."
+        )
+    n_accepted = len(df)
+
+    # Row-rejection accounting (audit F-07 / CHK-0205): nothing is discarded
+    # silently — the caller can read df.attrs["load_counts"].
+    counts = {
+        "rows_total": int(n_total),
+        "rows_accepted": int(n_accepted),
+        "rejected_nonnumeric": int(n_total - n_after_num),
+        "rejected_empty_id": int(n_after_num - n_after_id),
+        "rejected_by_filter": int(n_after_id - n_accepted),
+    }
+    log.info("Loaded %d of %d rows (rejected: %d non-numeric, %d empty-id, "
+             "%d filtered), %d wafers",
+             counts["rows_accepted"], counts["rows_total"],
+             counts["rejected_nonnumeric"], counts["rejected_empty_id"],
+             counts["rejected_by_filter"], df.groupby(["lot", "wafer"]).ngroups)
+    out = df.reset_index(drop=True)
+    out.attrs["load_counts"] = counts
+    return out
 
 
 def _try_read(filepath: Path) -> pd.DataFrame:
@@ -121,6 +152,24 @@ def _try_read(filepath: Path) -> pd.DataFrame:
         col 0 always (lot, or "lot wafer"), and col 1 too when lot/wafer are
         already split into their own columns (5+ column files).
     """
+    # Excel workbooks: the CSV engines would choke on the binary / zip container,
+    # so route them through pandas' Excel reader (openpyxl for .xlsx, xlrd for .xls).
+    if filepath.suffix.lower() in (".xlsx", ".xlsm", ".xls"):
+        try:
+            xl = pd.read_excel(filepath, header=None, dtype=str)
+        except ImportError as exc:
+            raise DataLoadError(
+                f"Reading '{filepath.name}' needs an Excel engine "
+                f"(pip install openpyxl for .xlsx, xlrd for .xls): {exc}")
+        except Exception as exc:
+            raise DataLoadError(f"Could not read Excel file '{filepath.name}': {exc}")
+        if xl.shape[1] < 4:
+            raise DataLoadError(
+                f"Excel file '{filepath.name}' has only {xl.shape[1]} column(s); "
+                f"at least 4 (lot, wafer, x, y[, value]) are required.")
+        print(f"✓ Parsed '{filepath.name}' as Excel.")
+        return xl.fillna("")
+
     last_exc: Exception | None = None
 
     for label, sep in (("tab-delimited", "\t"), ("CSV (comma)", ",")):

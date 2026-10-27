@@ -20,7 +20,7 @@ from PyQt6.QtWidgets import (
 from . import scheduler
 from .runner import (
     EXIT_OK, EXIT_ERROR, EXIT_NO_OUTPUT, EXIT_MISSING_INPUT,
-    EXIT_NO_MATCH_IN_FOLDER, EXIT_BAD_JOB,
+    EXIT_NO_MATCH_IN_FOLDER, EXIT_BAD_JOB, EXIT_BAD_OUTPUT,
 )
 
 # Windows Task Scheduler pseudo-results (not process exit codes).
@@ -34,6 +34,7 @@ _STATUS_MAP = {
     EXIT_MISSING_INPUT:      ("✗  Missing input file (EFF)", "#ef4444"),
     EXIT_NO_MATCH_IN_FOLDER: ("⚠  No matching file in folder", "#f59e0b"),
     EXIT_BAD_JOB:            ("✗  Bad / missing job file",   "#ef4444"),
+    EXIT_BAD_OUTPUT:         ("✗  Output folder unavailable", "#ef4444"),
     EXIT_NO_OUTPUT:          ("✗  Ran but no output",        "#ef4444"),
     EXIT_ERROR:              ("✗  Failed (error)",           "#ef4444"),
 }

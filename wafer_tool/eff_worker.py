@@ -45,6 +45,8 @@ class EffReportWorker(QThread):
         out_dir: str,
         scan: EffScan | None = None,
         parent=None,
+        filter_min: float | None = None,
+        filter_max: float | None = None,
     ) -> None:
         super().__init__(parent)
         self._eff_path = eff_path
@@ -52,6 +54,8 @@ class EffReportWorker(QThread):
         self._config = config
         self._out_dir = out_dir
         self._scan = scan
+        self._filter_min = filter_min
+        self._filter_max = filter_max
         self._cancel_evt = threading.Event()
 
     # ── public ──────────────────────────────────────────────────────────────
@@ -75,6 +79,8 @@ class EffReportWorker(QThread):
                 on_wafer_ready=self._on_wafer,
                 on_param_done=self.param_done.emit,
                 stop_cb=self._cancel_evt.is_set,
+                filter_min=self._filter_min,
+                filter_max=self._filter_max,
             )
             if self._cancel_evt.is_set():
                 self.error.emit("Cancelled by user.")
@@ -114,6 +120,8 @@ class EffPreviewWorker(QThread):
 
     def __init__(self, eff_path: str, index: int, name: str,
                  scan: EffScan | None = None, max_rows: int | None = None,
+                 filter_min: float | None = None,
+                 filter_max: float | None = None,
                  parent=None) -> None:
         super().__init__(parent)
         self._eff_path = eff_path
@@ -121,6 +129,8 @@ class EffPreviewWorker(QThread):
         self._name = name
         self._scan = scan
         self._max_rows = max_rows
+        self._filter_min = filter_min
+        self._filter_max = filter_max
         self._cancel_evt = threading.Event()
 
     def cancel(self) -> None:
@@ -131,6 +141,7 @@ class EffPreviewWorker(QThread):
             df = extract_single_param_df(
                 self._eff_path, self._index, scan=self._scan,
                 max_rows=self._max_rows, stop_cb=self._cancel_evt.is_set,
+                filter_min=self._filter_min, filter_max=self._filter_max,
             )
             if not self._cancel_evt.is_set():
                 self.ready.emit(df, self._index)

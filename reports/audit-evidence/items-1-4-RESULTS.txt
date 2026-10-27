@@ -1,0 +1,9 @@
+Audit remediation items 1-4 (decision-free) — all PASS
+  1. Row-rejection accounting (F-07/CHK-0205): data_loader records df.attrs["load_counts"]
+     {rows_total, rows_accepted, rejected_nonnumeric, rejected_empty_id, rejected_by_filter};
+     verified reconciles (12 total = 10 accepted + 1 non-numeric + 1 empty-id).
+  2. Coverage counts (F-03/CHK-0410): each wafer map annotated "meas <measured>/<lot-map>".
+  3. Grey control disabled under Extrapolate (CHK-0415): verified enable/disable toggling.
+  4a. Export parity (F-06): check_export_parity.py on a real report -> 8 pages / 9 slides, page-based parity.
+  4b. GUI==headless config (CHK-0804): PlotConfig built GUI-way == PlotConfig(**job.plot_config_kwargs()).
+Regression: numerical suite 7/7, automation tests 18/18 still pass.

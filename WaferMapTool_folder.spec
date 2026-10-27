@@ -12,6 +12,9 @@ mpl_data = collect_data_files("matplotlib")
 # numpy: collect_all ensures C-extension DLLs are bundled.
 numpy_datas, numpy_binaries, numpy_hidden = collect_all("numpy")
 
+# scipy: required by geometry.build_wafer_grid (scipy.interpolate.griddata).
+scipy_datas, scipy_binaries, scipy_hidden = collect_all("scipy")
+
 hidden = [
     "PyQt6.QtCore",
     "PyQt6.QtGui",
@@ -31,24 +34,26 @@ hidden = [
     "pptx.util",
     "pptx.enum.text",
     "pypdf",
+    # pywin32 — Outlook email backend (optional; guarded import at runtime)
+    "win32com",
+    "win32com.client",
+    "pythoncom",
+    "pywintypes",
+    "win32timezone",
 ]
 
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=numpy_binaries,
-    datas=mpl_data + numpy_datas,
-    hiddenimports=hidden + numpy_hidden,
+    binaries=numpy_binaries + scipy_binaries,
+    datas=mpl_data + numpy_datas + scipy_datas,
+    hiddenimports=hidden + numpy_hidden + scipy_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
         "tkinter", "wx", "_tkinter",
-        "scipy", "scipy.interpolate", "scipy.spatial",
-        "scipy.stats", "scipy.signal", "scipy.optimize",
-        "scipy.fft", "scipy.linalg", "scipy.io",
-        "scipy.ndimage", "scipy.odr", "scipy.sparse",
-        "scipy.cluster",
+        # scipy is REQUIRED (geometry.py uses scipy.interpolate.griddata).
         "pandas.io.formats.style",
         "pandas.io.clipboard",
         "pandas.tests",
@@ -70,7 +75,9 @@ a = Analysis(
         "reportlab",
         "IPython", "jupyter", "notebook",
         "pytest", "sphinx", "setuptools",
-        "distutils", "unittest",
+        "distutils",
+        # NOTE: keep 'unittest' — pyparsing (via matplotlib) imports it at
+        # import time; excluding it crashes the exe at startup.
         "PIL.ImageQt",
     ],
     noarchive=False,

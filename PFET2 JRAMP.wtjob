@@ -1,0 +1,29 @@
+{
+  "format": "wafer-tool-job",
+  "version": 1,
+  "created": "2026-08-04T14:38:32",
+  "input_file": "//e2asia12.intra.infineon.com/eSquare_user/ananthanbala_infineon/delivery/PFET2_8_6 months.eff",
+  "out_dir": "//e2asia12.intra.infineon.com/eSquare_user/ananthanbala_infineon/delivery",
+  "t_low": 30.0,
+  "t_high": 34.0,
+  "use_log": false,
+  "high_is_green": true,
+  "mirror_x": false,
+  "mirror_y": false,
+  "rot_deg": 0,
+  "input_dir": "",
+  "input_pattern": "*.eff",
+  "eff_params": [
+    "QBD_D__CK",
+    "VBD_D"
+  ],
+  "eff_filter_min": -1000.0,
+  "eff_filter_max": 1000.0,
+  "email_to": [
+    "chanlik.tan@infineon.com"
+  ],
+  "email_enabled": true,
+  "email_pdf": true,
+  "email_pptx": true,
+  "email_folder": true
+}

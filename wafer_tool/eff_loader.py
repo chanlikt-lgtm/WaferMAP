@@ -39,10 +39,13 @@ file.
 from __future__ import annotations
 
 import glob
+import json
 import os
 import re
 import shutil
+from collections import Counter
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
@@ -57,6 +60,8 @@ __all__ = [
     "extract_single_param_df",
     "flatten_param_pngs",
     "safe_param_name",
+    "eff_already_processed",
+    "record_eff_run",
 ]
 
 # Characters that are illegal in Windows file/folder names — parameter names
@@ -77,12 +82,16 @@ class EffScanError(Exception):
 @dataclass(slots=True)
 class EffParameter:
     """One selectable measurement parameter found in an .eff file."""
-    index: int          # column index in the raw row
+    index: int          # primary column index in the raw row
     name: str           # original parameter name from <+ParameterName>
     dtype: str          # value from <DataType> (e.g. "Double"), may be ""
     has_limits: bool    # True when spec limits are defined for this column
     limit_lower: float | None = None   # <LIMIT:SPEC:LOWER_VALUE> for this column
     limit_upper: float | None = None   # <LIMIT:SPEC:UPPER_VALUE> for this column
+    columns: list[int] = field(default_factory=list)   # all source columns
+    # merged into this parameter (same name + same spec limits, different
+    # lot/wafers). Defaults to [index]; the extractor reads the first non-empty
+    # of these per row so the maps/scatter/histogram cover every lot/wafer.
 
 
 @dataclass(slots=True)
@@ -215,6 +224,10 @@ class ExtractedParameter:
     folder: str         # per-parameter output folder
     txt_path: str       # the lot/wafer/x/y/value text file
     rows_written: int = 0
+    # (lot, wafer) that had valid data but lost every die to the value filter.
+    empty_wafers: list[tuple[str, str]] = field(default_factory=list)
+    # lot -> every (x, y) with a valid value before filtering (filter runs only).
+    die_sites: dict[str, list[tuple[float, float]]] = field(default_factory=dict)
 
 
 def extract_parameters(
@@ -224,6 +237,8 @@ def extract_parameters(
     scan: EffScan | None = None,
     progress_cb: Callable[[int, int], None] | None = None,
     stop_cb: Callable[[], bool] | None = None,
+    filter_min: float | None = None,
+    filter_max: float | None = None,
 ) -> list[ExtractedParameter]:
     """Stream *path* once, writing one text file per selected parameter.
 
@@ -236,6 +251,9 @@ def extract_parameters(
     progress_cb(rows_done, rows_total) : optional progress callback.  Raising
         from it (as the worker does on cancel) aborts the pass cleanly.
     stop_cb() -> bool : optional cooperative-cancel check.
+    filter_min, filter_max : optional inclusive value range.  When given, any
+        measurement value below ``filter_min`` or above ``filter_max`` is
+        dropped (a global data filter applied to every parameter).
 
     Returns the list of :class:`ExtractedParameter` (in the given order).
     """
@@ -253,24 +271,35 @@ def extract_parameters(
     targets: list[ExtractedParameter] = []
     used_names: set[str] = set()
     handles: dict[int, _BufferedWriter] = {}
+    # One timestamp for the whole run, appended to each parameter's folder so a
+    # re-run of the same .eff writes to fresh folders instead of overwriting.
+    run_ts = datetime.now().strftime("%Y_%m_%d_%H%M%S")
+    param_cols: dict[int, list[int]] = {}
     for idx in indices:
         param = scan.parameter_by_index(idx)
         name = param.name if param else f"col{idx}"
+        cols = list(param.columns) if (param and param.columns) else [idx]
         safe = _reserve_name(safe_param_name(name), used_names)
-        folder = os.path.join(out_base_dir, safe)
+        folder = os.path.join(out_base_dir, f"{safe}_{run_ts}")
         os.makedirs(folder, exist_ok=True)
         txt_path = os.path.join(folder, f"{safe}.txt")
         extracted = ExtractedParameter(name=name, safe_name=safe,
                                        folder=folder, txt_path=txt_path)
         targets.append(extracted)
         handles[idx] = _BufferedWriter(txt_path)
+        param_cols[idx] = cols
 
     total = scan.declared_rows or _estimate_rows(path)
     update_every = max(total // _PROGRESS_UPDATE_STEPS, 1)
-    max_col_needed = max(min_coord_col, max(indices))
+    all_cols = [c for cols in param_cols.values() for c in cols]
+    max_col_needed = max(min_coord_col, max(all_cols) if all_cols else min_coord_col)
 
     rows_done = 0
     data_started = False
+    filtering = filter_min is not None or filter_max is not None
+    seen: dict[int, set[tuple[str, str]]] = {idx: set() for idx in indices}
+    kept: dict[int, set[tuple[str, str]]] = {idx: set() for idx in indices}
+    sites: dict[int, set[tuple[str, str, str]]] = {idx: set() for idx in indices}
     try:
         with open(path, "r", encoding="utf-8", errors="ignore") as fh:
             for line in fh:
@@ -299,18 +328,34 @@ def extract_parameters(
                 if not lot_val or not x_val or not y_val:
                     continue
                 prefix = f"{lot_val} {wafer_val}\t{x_val}\t{y_val}\t"
+                key = (lot_val, wafer_val)
 
                 for idx in indices:
-                    raw = row[idx].strip()
-                    if not raw:
-                        continue
-                    try:
-                        val = float(raw)
-                    except ValueError:
-                        continue
-                    if abs(val) >= _INVALID_MAGNITUDE:
-                        continue
-                    handles[idx].write(prefix + raw + "\n")
+                    # Merged parameter: take the first non-empty of its columns
+                    # (different lot/wafers populate different columns).
+                    for c in param_cols[idx]:
+                        if c >= len(row):
+                            continue
+                        raw = row[c].strip()
+                        if not raw:
+                            continue
+                        try:
+                            val = float(raw)
+                        except ValueError:
+                            continue
+                        if abs(val) >= _INVALID_MAGNITUDE:
+                            continue
+                        if filtering:
+                            seen[idx].add(key)
+                            sites[idx].add((lot_val, x_val, y_val))
+                        if filter_min is not None and val < filter_min:
+                            continue
+                        if filter_max is not None and val > filter_max:
+                            continue
+                        handles[idx].write(prefix + raw + "\n")
+                        if filtering:
+                            kept[idx].add(key)
+                        break
 
                 rows_done += 1
                 if progress_cb is not None and rows_done % update_every == 0:
@@ -322,12 +367,85 @@ def extract_parameters(
     # Record per-parameter line counts (cheap: the writers tracked them).
     for extracted, idx in zip(targets, indices):
         extracted.rows_written = handles[idx].lines_written
+        extracted.empty_wafers = sorted(seen[idx] - kept[idx])
+        for lot, xs, ys in sites[idx]:
+            try:
+                extracted.die_sites.setdefault(lot, []).append((float(xs), float(ys)))
+            except ValueError:
+                continue
 
     if progress_cb is not None:
         progress_cb(total, total)
 
     log.info("Extracted %d parameter(s) from %s", len(targets), os.path.basename(path))
     return targets
+
+
+# ---------------------------------------------------------------------------
+# Duplicate-run detection (same .eff, already generated)
+# ---------------------------------------------------------------------------
+
+_RUN_META_NAME = ".wafertool_eff_runs.json"
+
+
+def _eff_signature(eff_path: str | Path) -> dict:
+    """Size + whole-second modification time — the 'same size and date' key."""
+    st = os.stat(str(eff_path))
+    return {"size": st.st_size, "mtime": int(st.st_mtime)}
+
+
+def eff_already_processed(eff_path: str | Path, out_dir: str | Path) -> bool:
+    """True when *eff_path* (same size AND modification date) was already
+    generated into *out_dir* and at least one produced folder with a PDF still
+    exists. Used by the GUI to prompt before regenerating; automation ignores it.
+    Any error is swallowed and treated as 'not processed' (fail open -> run).
+    """
+    try:
+        meta = os.path.join(str(out_dir), _RUN_META_NAME)
+        if not os.path.isfile(meta):
+            return False
+        with open(meta, "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        entry = data.get(os.path.basename(str(eff_path)))
+        if not entry:
+            return False
+        sig = _eff_signature(eff_path)
+        if entry.get("size") != sig["size"] or entry.get("mtime") != sig["mtime"]:
+            return False
+        for folder in entry.get("folders", []):
+            if os.path.isdir(folder) and any(
+                    fn.lower().endswith(".pdf") for fn in os.listdir(folder)):
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def record_eff_run(eff_path: str | Path, out_dir: str | Path,
+                   folders: list[str]) -> None:
+    """Record this .eff's size/date and the folders it produced, so a later run
+    can detect an unchanged regeneration. Never raises."""
+    try:
+        meta = os.path.join(str(out_dir), _RUN_META_NAME)
+        data: dict = {}
+        if os.path.isfile(meta):
+            try:
+                with open(meta, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception:
+                data = {}
+        sig = _eff_signature(eff_path)
+        data[os.path.basename(str(eff_path))] = {
+            "size": sig["size"],
+            "mtime": sig["mtime"],
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "folders": [str(f) for f in folders],
+        }
+        os.makedirs(str(out_dir), exist_ok=True)
+        with open(meta, "w", encoding="utf-8") as fh:
+            json.dump(data, fh, indent=2)
+    except Exception as exc:  # pragma: no cover - marker is best-effort
+        log.warning("Could not write eff run marker in %s: %s", out_dir, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -340,6 +458,8 @@ def extract_single_param_df(
     scan: EffScan | None = None,
     max_rows: int | None = None,
     stop_cb: Callable[[], bool] | None = None,
+    filter_min: float | None = None,
+    filter_max: float | None = None,
 ):
     """Read one parameter of an .eff into an in-memory DataFrame (no disk write).
 
@@ -349,6 +469,8 @@ def extract_single_param_df(
     consume it unchanged.  Used to build the scatter / histogram preview for the
     first selected parameter.  ``max_rows`` caps the scan (a fast look on huge
     files); ``stop_cb`` allows a background worker to abort early.
+    ``filter_min`` / ``filter_max`` apply the same value filter as
+    :func:`extract_parameters`.
     """
     import numpy as np
     import pandas as pd
@@ -357,7 +479,9 @@ def extract_single_param_df(
     if scan is None:
         scan = scan_eff(path)
     coord = scan.coord_indices
-    max_col = max(max(coord.values()), index)
+    param = scan.parameter_by_index(index)
+    cols = list(param.columns) if (param and param.columns) else [index]
+    max_col = max(max(coord.values()), max(cols))
 
     lots: list[str] = []
     wafers: list[str] = []
@@ -377,7 +501,11 @@ def extract_single_param_df(
             if len(row) <= max_col:
                 continue
             data_started = True
-            raw = row[index].strip()
+            raw = ""
+            for c in cols:                       # merged: first non-empty column
+                if c < len(row) and row[c].strip():
+                    raw = row[c].strip()
+                    break
             if not raw:
                 continue
             try:
@@ -385,6 +513,10 @@ def extract_single_param_df(
             except ValueError:
                 continue
             if abs(v) >= _INVALID_MAGNITUDE:
+                continue
+            if filter_min is not None and v < filter_min:
+                continue
+            if filter_max is not None and v > filter_max:
                 continue
             lot = row[coord["lot"]]
             if not lot:
@@ -496,7 +628,50 @@ def _collect_parameters(
         params.append(EffParameter(index=idx, name=name, dtype=dtype,
                                     has_limits=has_limits,
                                     limit_lower=lower, limit_upper=upper))
-    return params
+    return _merge_duplicate_params(params)
+
+
+def _merge_duplicate_params(params: list[EffParameter]) -> list[EffParameter]:
+    """Merge columns with the same name AND the same spec limits into one
+    parameter that reads from all of them.
+
+    An .eff can repeat a measurement across several columns that each hold data
+    for different lot/wafers (e.g. four ``VT_FP.M1`` columns). Merging them
+    yields a single output folder, one map set, and a combined scatter /
+    histogram. Same name but *different* spec limits stays separate and gets a
+    numeric suffix so it is still individually addressable.
+    """
+    groups: dict[tuple, EffParameter] = {}
+    order: list[tuple] = []
+    for p in params:
+        key = (p.name, p.limit_lower, p.limit_upper)
+        primary = groups.get(key)
+        if primary is None:
+            p.columns = [p.index]
+            groups[key] = p
+            order.append(key)
+        else:
+            primary.columns.append(p.index)
+    merged = [groups[k] for k in order]
+    _disambiguate_names(merged)   # only names that still collide (diff spec)
+    return merged
+
+
+def _disambiguate_names(params: list[EffParameter]) -> None:
+    """Make duplicate parameter names unique in place.
+
+    An .eff can carry the same measurement name in several columns (e.g. four
+    ``VT_FP.M1`` columns). Left as-is they are indistinguishable in the picker
+    and only the first is reachable by name (folder naming, ``resolve_indices``).
+    Every occurrence of a repeated name is numbered ``name_1``, ``name_2``, ... ;
+    names that appear once are left unchanged.
+    """
+    counts = Counter(p.name for p in params)
+    seen: dict[str, int] = {}
+    for p in params:
+        if counts[p.name] > 1:
+            seen[p.name] = seen.get(p.name, 0) + 1
+            p.name = f"{p.name}_{seen[p.name]}"
 
 
 def _is_measurement_column(

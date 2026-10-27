@@ -85,11 +85,15 @@ class ReportWorker(QThread):
         config: PlotConfig,
         out_dir: str,
         parent=None,
+        filter_min: float | None = None,
+        filter_max: float | None = None,
     ) -> None:
         super().__init__(parent)
         self._filepath   = filepath
         self._config     = config
         self._out_dir    = out_dir
+        self._filter_min = filter_min
+        self._filter_max = filter_max
         self._cancel_evt = threading.Event()  # thread-safe; plain bool has no memory barrier
 
     # ------------------------------------------------------------------
@@ -113,6 +117,8 @@ class ReportWorker(QThread):
                 out_dir=self._out_dir,
                 on_progress=self._on_progress,
                 on_wafer_ready=self._on_wafer_ready,
+                filter_min=self._filter_min,
+                filter_max=self._filter_max,
             )
             if self._cancel_evt.is_set():
                 log.info("Worker: cancelled by user")

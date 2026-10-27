@@ -8,6 +8,13 @@ shown as fixed, non-editable), so the dialog only lets the user choose which
 **measurement parameters** to turn into wafer maps.  At least one parameter
 must be selected; the maximum is however many the file contains.  Each chosen
 parameter later gets its own output folder.
+
+The parameters are shown in a table so their **spec limits** (Lower / Upper,
+read from the ``<LIMIT:SPEC:...>`` header rows) are visible beside each name.
+A single, global **value filter** sits beside the spec columns: when enabled,
+measurement values outside ``[min, max]`` are dropped during import so they
+never reach the wafer map.  It is prefilled from the file's spec limits and is
+fully editable.
 """
 from __future__ import annotations
 
@@ -15,12 +22,29 @@ from typing import Iterable
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QDialog, QDialogButtonBox, QHBoxLayout, QLabel,
-    QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton,
-    QVBoxLayout,
+    QAbstractItemView, QCheckBox, QDialog, QDialogButtonBox, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton, QTableWidget,
+    QTableWidgetItem, QVBoxLayout,
 )
 
 from ..eff_loader import EffScan
+
+# Table columns.
+_COL_NAME = 0
+_COL_TYPE = 1
+_COL_LOWER = 2
+_COL_UPPER = 3
+
+
+def _fmt(value: float | None) -> str:
+    """Scientific-notation display for a spec limit (trailing zeros trimmed),
+    or an em dash when absent. e.g. 10 -> '1E+01', 30.5 -> '3.05E+01'."""
+    if value is None:
+        return "—"
+    mantissa, exponent = f"{value:.6E}".split("E")
+    mantissa = mantissa.rstrip("0").rstrip(".")
+    return f"{mantissa}E{exponent}"
+
 
 
 class EffParameterDialog(QDialog):
@@ -30,10 +54,9 @@ class EffParameterDialog(QDialog):
                  preselected: Iterable[str] | None = None) -> None:
         super().__init__(parent)
         self.setWindowTitle("Choose Parameters to Map")
-        self.resize(560, 560)
+        self.resize(640, 600)
 
         self._scan = scan
-        self._items: list[QListWidgetItem] = []
         preset = set(preselected) if preselected is not None else None
 
         root = QVBoxLayout(self)
@@ -51,9 +74,9 @@ class EffParameterDialog(QDialog):
         header.setWordWrap(True)
         root.addWidget(header)
 
-        # Filter box
+        # Filter-by-name box
         filt_row = QHBoxLayout()
-        filt_row.addWidget(QLabel("Filter:"))
+        filt_row.addWidget(QLabel("Find:"))
         self._search = QLineEdit()
         self._search.setPlaceholderText("type to filter parameter names…")
         self._filter_timer = QTimer(self)
@@ -77,32 +100,70 @@ class EffParameterDialog(QDialog):
         btn_row.addStretch(1)
         root.addLayout(btn_row)
 
-        # Parameter list
-        self._list = QListWidget()
-        self._list.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
-        self._list.setUniformItemSizes(True)
-        self._list.setUpdatesEnabled(False)
+        # Parameter table: name (checkable) | type | spec lower | spec upper
+        self._table = QTableWidget(len(scan.parameters), 4)
+        self._table.setHorizontalHeaderLabels(
+            ["Parameter", "Type", "Spec Lower", "Spec Upper"])
+        self._table.verticalHeader().setVisible(False)
+        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self._table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        hh = self._table.horizontalHeader()
+        hh.setSectionResizeMode(_COL_NAME, QHeaderView.ResizeMode.Stretch)
+        for c in (_COL_TYPE, _COL_LOWER, _COL_UPPER):
+            hh.setSectionResizeMode(c, QHeaderView.ResizeMode.ResizeToContents)
+
+        self._table.setUpdatesEnabled(False)
         try:
-            for p in scan.parameters:
-                label = f"{p.name}    [{p.dtype or '?'}]"
-                if p.has_limits:
-                    label += "  (limits)"
-                it = QListWidgetItem(label)
-                it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            for r, p in enumerate(scan.parameters):
+                name_it = QTableWidgetItem(p.name)
+                name_it.setFlags(Qt.ItemFlag.ItemIsUserCheckable
+                                 | Qt.ItemFlag.ItemIsEnabled)
                 checked = (preset is None) or (p.name in preset)
-                it.setCheckState(Qt.CheckState.Checked if checked
-                                 else Qt.CheckState.Unchecked)
-                it.setData(Qt.ItemDataRole.UserRole, p.index)
-                it.setData(Qt.ItemDataRole.UserRole + 1, p.name.lower())
-                it.setData(Qt.ItemDataRole.UserRole + 2, p.has_limits)
-                self._list.addItem(it)
-                self._items.append(it)
+                name_it.setCheckState(Qt.CheckState.Checked if checked
+                                      else Qt.CheckState.Unchecked)
+                name_it.setData(Qt.ItemDataRole.UserRole, p.index)
+                name_it.setData(Qt.ItemDataRole.UserRole + 1, p.name.lower())
+                name_it.setData(Qt.ItemDataRole.UserRole + 2, p.has_limits)
+                self._table.setItem(r, _COL_NAME, name_it)
+                self._table.setItem(r, _COL_TYPE, QTableWidgetItem(p.dtype or "?"))
+                low = QTableWidgetItem(_fmt(p.limit_lower))
+                up = QTableWidgetItem(_fmt(p.limit_upper))
+                align = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                low.setTextAlignment(align)
+                up.setTextAlignment(align)
+                self._table.setItem(r, _COL_LOWER, low)
+                self._table.setItem(r, _COL_UPPER, up)
         finally:
-            self._list.setUpdatesEnabled(True)
-        root.addWidget(self._list, 1)
+            self._table.setUpdatesEnabled(True)
+        root.addWidget(self._table, 1)
+
+        # ── Global value filter (beside the spec columns) ──────────────────
+        # Default to a ±1000 guard band, enabled; the spec columns above stay
+        # for reference. Edit or uncheck as needed.
+        default_min, default_max = -1000.0, 1000.0
+        filt = QHBoxLayout()
+        self._filter_chk = QCheckBox("Apply value filter — drop values outside")
+        self._filter_chk.setToolTip(
+            "When checked, any measurement value below Min or above Max is dropped "
+            "during import for every selected parameter, so it never reaches the "
+            "wafer map. Defaults to ±1000; edit as needed.")
+        self._min_edit = QLineEdit(); self._min_edit.setPlaceholderText("Min")
+        self._min_edit.setFixedWidth(90)
+        self._max_edit = QLineEdit(); self._max_edit.setPlaceholderText("Max")
+        self._max_edit.setFixedWidth(90)
+        self._min_edit.setText(str(int(default_min)))
+        self._max_edit.setText(str(int(default_max)))
+        self._filter_chk.setChecked(True)
+        self._filter_chk.toggled.connect(self._min_edit.setEnabled)
+        self._filter_chk.toggled.connect(self._max_edit.setEnabled)
+        filt.addWidget(self._filter_chk)
+        filt.addWidget(QLabel("Min:")); filt.addWidget(self._min_edit)
+        filt.addWidget(QLabel("Max:")); filt.addWidget(self._max_edit)
+        filt.addStretch(1)
+        root.addLayout(filt)
 
         self._count = QLabel()
-        self._list.itemChanged.connect(lambda _: self._update_count())
+        self._table.itemChanged.connect(lambda _: self._update_count())
         self._update_count()
         root.addWidget(self._count)
 
@@ -113,39 +174,65 @@ class EffParameterDialog(QDialog):
         bb.rejected.connect(self.reject)
         root.addWidget(bb)
 
+    # ── helpers ────────────────────────────────────────────────────────────
+
+    def _name_items(self):
+        for r in range(self._table.rowCount()):
+            yield r, self._table.item(r, _COL_NAME)
+
     # ── behaviour ──────────────────────────────────────────────────────────
 
     def _apply_filter(self) -> None:
         needle = self._search.text().strip().lower()
-        for it in self._items:
+        for r, it in self._name_items():
             name = it.data(Qt.ItemDataRole.UserRole + 1) or ""
-            it.setHidden(bool(needle) and needle not in name)
+            self._table.setRowHidden(r, bool(needle) and needle not in name)
 
     def _set_visible(self, state: Qt.CheckState) -> None:
-        self._list.blockSignals(True)
+        self._table.blockSignals(True)
         try:
-            for it in self._items:
-                if not it.isHidden():
+            for r, it in self._name_items():
+                if not self._table.isRowHidden(r):
                     it.setCheckState(state)
         finally:
-            self._list.blockSignals(False)
+            self._table.blockSignals(False)
         self._update_count()
 
     def _select_with_limits(self) -> None:
-        self._list.blockSignals(True)
+        self._table.blockSignals(True)
         try:
-            for it in self._items:
+            for _r, it in self._name_items():
                 has = bool(it.data(Qt.ItemDataRole.UserRole + 2))
                 it.setCheckState(Qt.CheckState.Checked if has
                                  else Qt.CheckState.Unchecked)
         finally:
-            self._list.blockSignals(False)
+            self._table.blockSignals(False)
         self._update_count()
 
     def _update_count(self) -> None:
-        n = sum(1 for it in self._items
+        n = sum(1 for _r, it in self._name_items()
                 if it.checkState() == Qt.CheckState.Checked)
-        self._count.setText(f"<i>{n} of {len(self._items)} parameter(s) selected</i>")
+        self._count.setText(
+            f"<i>{n} of {self._table.rowCount()} parameter(s) selected</i>")
+
+    def _parse_filter(self) -> tuple[float | None, float | None] | None:
+        """Return (min, max) when the filter is enabled and valid, (None, None)
+        when disabled, or None when the inputs are invalid (a message is shown)."""
+        if not self._filter_chk.isChecked():
+            return (None, None)
+        try:
+            fmin = float(self._min_edit.text().strip())
+            fmax = float(self._max_edit.text().strip())
+        except ValueError:
+            QMessageBox.warning(
+                self, "Invalid filter range",
+                "Enter numeric Min and Max values, or uncheck the value filter.")
+            return None
+        if fmin >= fmax:
+            QMessageBox.warning(
+                self, "Invalid filter range", "Filter Min must be less than Max.")
+            return None
+        return (fmin, fmax)
 
     def _on_accept(self) -> None:
         if not self.selected_indices():
@@ -153,14 +240,22 @@ class EffParameterDialog(QDialog):
                 self, "No parameters selected",
                 "Select at least one measurement parameter to generate maps.")
             return
+        if self._parse_filter() is None:
+            return
         self.accept()
 
     # ── results ────────────────────────────────────────────────────────────
 
     def selected_indices(self) -> list[int]:
-        return [it.data(Qt.ItemDataRole.UserRole) for it in self._items
+        return [it.data(Qt.ItemDataRole.UserRole) for _r, it in self._name_items()
                 if it.checkState() == Qt.CheckState.Checked]
 
     def selected_names(self) -> list[str]:
         by_index = {p.index: p.name for p in self._scan.parameters}
         return [by_index[i] for i in self.selected_indices() if i in by_index]
+
+    def filter_range(self) -> tuple[float | None, float | None]:
+        """The enabled (min, max) value filter, or (None, None) when disabled."""
+        parsed = self._parse_filter()
+        return parsed if parsed is not None else (None, None)
+

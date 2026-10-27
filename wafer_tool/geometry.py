@@ -10,15 +10,17 @@ Public API
 ----------
 signed_log10(a, eps)
 apply_transforms(x, y, mirror_x, mirror_y, rot_deg)
-build_wafer_grid(x, y, z, resolution, radius_factor)
+build_wafer_grid(x, y, z, resolution, radius_factor, extent, die_margin)
+far_from_data_mask(xi, yi, x, y, max_dist)
 """
 from __future__ import annotations
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.interpolate import griddata
+from scipy.spatial import cKDTree
 
-__all__ = ["signed_log10", "apply_transforms", "build_wafer_grid"]
+__all__ = ["signed_log10", "apply_transforms", "build_wafer_grid", "far_from_data_mask"]
 
 
 def signed_log10(a: NDArray, eps: float = 1e-15) -> NDArray:
@@ -102,6 +104,8 @@ def build_wafer_grid(
     z: NDArray,
     resolution: int   = 150,
     radius_factor: float = 1.05,
+    extent: tuple[NDArray, NDArray] | None = None,
+    die_margin: float = 0.5,
 ) -> tuple[NDArray, NDArray, NDArray, float, float, float]:
     """
     Build a 2-D interpolated grid suitable for wafer contour plotting.
@@ -122,6 +126,11 @@ def build_wafer_grid(
     resolution  : Number of grid points along each axis.
     radius_factor: Multiplier applied to half the data span to set the
                    wafer boundary radius (> 1.0 adds a small margin).
+    extent      : Optional (x, y) arrays whose bounding box sets the centre and
+                  radius instead of the data (e.g. every die site in the lot,
+                  so all wafers of a lot share one outline).
+    die_margin  : The radius always reaches the farthest die plus this margin,
+                  so corner dies are never clipped by the circle.
 
     Returns
     -------
@@ -130,14 +139,18 @@ def build_wafer_grid(
     x_mid, y_mid : Centroid coordinates.
     radius       : Wafer boundary radius used for masking.
     """
-    x_mid = (x.max() + x.min()) / 2.0
-    y_mid = (y.max() + y.min()) / 2.0
+    bx, by = (x, y) if extent is None else extent
+    x_mid = (bx.max() + bx.min()) / 2.0
+    y_mid = (by.max() + by.min()) / 2.0
 
-    max_range = max(x.max() - x.min(), y.max() - y.min())
+    max_range = max(bx.max() - bx.min(), by.max() - by.min())
     if max_range == 0:
         max_range = 10.0          # Bug-fix: original had '==' instead of '='
 
     radius = (max_range / 2.0) * radius_factor
+    farthest = float(np.sqrt(((bx - x_mid) ** 2 + (by - y_mid) ** 2).max()))
+    if farthest > 0:
+        radius = max(radius, farthest + die_margin)
 
     lin_x = np.linspace(x_mid - radius, x_mid + radius, resolution, dtype=np.float32)
     lin_y = np.linspace(y_mid - radius, y_mid + radius, resolution, dtype=np.float32)
@@ -177,3 +190,17 @@ def build_wafer_grid(
     del outside  # free ~resolution² booleans
 
     return xi, yi, zi, x_mid, y_mid, radius
+
+
+def far_from_data_mask(
+    xi: NDArray,
+    yi: NDArray,
+    x: NDArray,
+    y: NDArray,
+    max_dist: float,
+) -> NDArray:
+    """Boolean grid mask: True where the nearest measured point (x, y) is
+    farther than *max_dist* (too far to interpolate meaningfully)."""
+    tree = cKDTree(np.column_stack([x, y]).astype(np.float64))
+    dist, _ = tree.query(np.column_stack([xi.ravel(), yi.ravel()]))
+    return (dist > max_dist).reshape(xi.shape)

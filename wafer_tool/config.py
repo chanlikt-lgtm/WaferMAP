@@ -15,12 +15,17 @@ from dataclasses import dataclass
 COLOR_GREEN  = "#00CC00"
 COLOR_YELLOW = "#FFD700"
 COLOR_RED    = "#CC0000"
+COLOR_MISSING = "#BDBDBD"   # area too far from any measured die to interpolate
 
 # ---------------------------------------------------------------------------
 # Plotting tuning constants
 # ---------------------------------------------------------------------------
 GRID_RESOLUTION: int   = 100    # interpolation grid points per axis
 WAFER_RADIUS_FACTOR: float = 1.05  # expand radius slightly beyond data extents
+DIE_PITCH: float = 1.0          # X/Y are die indices, so one chip = 1 unit
+# Areas farther than this many chips from any measured die are drawn grey
+# ("No data"); closer gaps (e.g. checkerboard sampling) are interpolated.
+MAX_INTERP_DIST_CHIPS: float = 4.0
 MIN_POINTS_FOR_PLOT: int  = 4   # minimum die points needed to attempt a plot
 MAX_WAFERS_PER_PAGE: int  = 25  # 5×5 grid on each PDF page
 LINES_PER_SUMMARY_PAGE: int = 55
@@ -77,6 +82,14 @@ class PlotConfig:
     mirror_x:     bool = False
     mirror_y:     bool = False
     rot_deg:      int  = 0   # must be one of {0, 90, 180, 270}
+    # Wafer-map gap handling:
+    #   show_missing_grey : draw "no data" regions grey (COLOR_MISSING); when
+    #                       False those cells are left unpainted (white).
+    #   extrapolate       : False -> interpolate only within MAX_INTERP_DIST_CHIPS
+    #                       of a measured die (farther = "no data"); True ->
+    #                       nearest-neighbour fill the whole wafer disc (no gaps).
+    show_missing_grey: bool = True
+    extrapolate:       bool = False
 
     def __post_init__(self) -> None:
         # Guarantee t_low ≤ t_high regardless of user input order

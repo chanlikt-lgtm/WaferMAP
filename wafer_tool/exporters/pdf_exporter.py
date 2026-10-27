@@ -27,12 +27,14 @@ import shutil
 from datetime import datetime
 
 import matplotlib.pyplot as plt
+import pandas as pd
 from matplotlib.backends.backend_pdf import PdfPages
 from matplotlib.patches import Patch
 from pypdf import PdfReader, PdfWriter
 
-from ..config import PlotConfig, MAX_WAFERS_PER_PAGE, LINES_PER_SUMMARY_PAGE, PAGE_PNG_DPI
-from ..plotting import draw_wafer_ax
+from ..config import (PlotConfig, MAX_WAFERS_PER_PAGE, LINES_PER_SUMMARY_PAGE,
+                      PAGE_PNG_DPI, COLOR_MISSING)
+from ..plotting import draw_wafer_ax, lot_die_sites
 from .report_charts import draw_scatter, draw_histogram, wafer_codes_and_names
 from ..statistics import ConditionCounts, create_8_condition_summary_page
 
@@ -49,7 +51,7 @@ _PDF_PARALLEL_MIN_PAGES = 8
 # ---------------------------------------------------------------------------
 def _render_grid_page(job: tuple) -> int:
     (grid_seq, page_pdf_path, page_png_path, lot_id, base_name,
-     display_counter, config, wafer_ids, page_df) = job
+     display_counter, config, wafer_ids, page_df, lot_sites) = job
 
     import matplotlib
     matplotlib.use("Agg")
@@ -65,8 +67,12 @@ def _render_grid_page(job: tuple) -> int:
     try:
         for j, ax in enumerate(axes.flat):
             if j < len(wafer_ids):
-                draw_wafer_ax(ax, groups[wafer_ids[j]], wafer_ids[j], config,
-                              show_legend=False, show_title=True)
+                if wafer_ids[j] in groups:
+                    draw_wafer_ax(ax, groups[wafer_ids[j]], wafer_ids[j], config,
+                                  show_legend=False, show_title=True,
+                                  lot_sites=lot_sites)
+                else:
+                    _draw_empty_wafer(ax, wafer_ids[j])
             else:
                 ax.axis("off")
         with _PdfPages(page_pdf_path) as pp:
@@ -76,6 +82,13 @@ def _render_grid_page(job: tuple) -> int:
     finally:
         _plt.close(fig)
     return grid_seq
+
+
+def _draw_empty_wafer(ax, wafer_id: str) -> None:
+    ax.text(0.5, 0.5, "No data in\nfilter range", ha="center", va="center",
+            fontsize=7, color="#888888", transform=ax.transAxes)
+    ax.set_title(f"W: {wafer_id}", fontsize=10, fontweight="bold")
+    ax.axis("off")
 
 
 def generate_pdf(
@@ -88,6 +101,8 @@ def generate_pdf(
     page_png_dir: str | None = None,
     jobs: int | None = None,
     on_page=None,
+    empty_wafers: list[tuple[str, str]] | None = None,
+    extra_sites: dict[str, list[tuple[float, float]]] | None = None,
 ) -> str:
     """
     Build the complete PDF report.
@@ -96,6 +111,10 @@ def generate_pdf(
            processes. Parallelism only kicks in for reports with a few grid
            pages (spawn overhead isn't worth it for tiny reports).
     on_page : optional callback(done, total) fired as grid pages complete.
+    empty_wafers : (lot, wafer) pairs with no data after filtering; each keeps
+           its grid slot with a "No data in filter range" placeholder.
+    extra_sites : per-lot die positions absent from *data* (e.g. removed by a
+           value filter); they still count toward the lot's wafer outline.
     """
     base_name = os.path.splitext(os.path.basename(filepath))[0]
     final_pdf = os.path.join(out_dir, f"{base_name}{config.log_suffix}_{timestamp}.pdf")
@@ -139,23 +158,35 @@ def generate_pdf(
     grid_jobs: list[tuple] = []
     grid_seq = 0
     dc = display_counter
-    for lot_id, lot_df in lot_groups:
-        wafer_ids = [str(w) for w in sorted(lot_df["wafer"].astype(str).unique())]
+    empty_by_lot: dict[str, set[str]] = {}
+    for e_lot, e_wafer in empty_wafers or ():
+        empty_by_lot.setdefault(str(e_lot), set()).add(str(e_wafer))
+    lot_frames = {str(lot): df for lot, df in lot_groups if len(df)}
+    for lot_id in sorted(set(lot_frames) | set(empty_by_lot)):
+        lot_df = lot_frames.get(lot_id)
+        present = (set(lot_df["wafer"].astype(str).unique())
+                   if lot_df is not None else set())
+        wafer_ids = sorted(present | empty_by_lot.get(lot_id, set()))
         for batch_start in range(0, len(wafer_ids), MAX_WAFERS_PER_PAGE):
             batch = wafer_ids[batch_start: batch_start + MAX_WAFERS_PER_PAGE]
             if batch_start == 0:
                 bookmarks.append((f"Lot: {lot_id}{config.log_suffix}", n_head + grid_seq))
             # Slice this page's data; drop the category dtype so the pickle sent
             # to a worker doesn't drag the whole (50k-wide) categorical index.
-            mask = lot_df["wafer"].astype(str).isin(batch)
-            sub = lot_df.loc[mask, ["wafer", "x", "y", "value"]].copy()
-            sub["wafer"] = sub["wafer"].astype(str)
+            if lot_df is not None:
+                mask = lot_df["wafer"].astype(str).isin(batch)
+                sub = lot_df.loc[mask, ["wafer", "x", "y", "value"]].copy()
+                sub["wafer"] = sub["wafer"].astype(str)
+            else:
+                sub = pd.DataFrame(columns=["wafer", "x", "y", "value"])
+            sites = (lot_die_sites(lot_df, (extra_sites or {}).get(lot_id))
+                     if lot_df is not None else None)
             png_path = _page_png_path(
                 page_png_dir, dc,
                 f"lot_{lot_id}_page_{batch_start // MAX_WAFERS_PER_PAGE + 1}")
             grid_jobs.append((
                 grid_seq, os.path.join(tmp_dir, f"page_{grid_seq:04d}.pdf"),
-                png_path, str(lot_id), base_name, dc, config, batch, sub,
+                png_path, str(lot_id), base_name, dc, config, batch, sub, sites,
             ))
             grid_seq += 1
             dc += 1
@@ -262,7 +293,8 @@ def _add_scatter_page(pdf, data, config: PlotConfig, base_name: str,
     """Write the overview Threshold Scatter as one landscape PDF page (+ PNG)."""
     z = data["value"].to_numpy(dtype="float32", copy=False)
     codes, names = wafer_codes_and_names(data)
-    fig, ax = plt.subplots(figsize=(11.69, 8.27))
+    # 16:9 aspect so the page image fills a widescreen PPTX slide.
+    fig, ax = plt.subplots(figsize=(13.33, 7.5))
     try:
         draw_scatter(ax, z, config, wafer_codes=codes, wafer_names=names,
                      title=f"Threshold Scatter — {base_name}")
@@ -282,7 +314,8 @@ def _add_histogram_page(pdf, data, config: PlotConfig, base_name: str,
                         display_counter: int, page_png_dir: str | None) -> int:
     """Write the overview value Histogram as one landscape PDF page (+ PNG)."""
     z = data["value"].to_numpy(dtype="float32", copy=False)
-    fig, ax = plt.subplots(figsize=(11.69, 8.27))
+    # 16:9 aspect so the page image fills a widescreen PPTX slide.
+    fig, ax = plt.subplots(figsize=(13.33, 7.5))
     try:
         draw_histogram(ax, z, config, title=f"Value Histogram — {base_name}")
         fig.text(0.98, 0.02, f"Page {display_counter}", fontsize=11,
@@ -312,6 +345,7 @@ def _add_page_legend(fig, config: PlotConfig) -> None:
         Patch(facecolor=cs.mid,  edgecolor="black",
               label=f"{config.t_low:g} – {config.t_high:g}"),
         Patch(facecolor=cs.high, edgecolor="black", label=f"≥ {config.t_high:g}"),
+        Patch(facecolor=COLOR_MISSING, edgecolor="black", label="No data"),
     ]
     fig.legend(
         handles=handles, loc="upper right",

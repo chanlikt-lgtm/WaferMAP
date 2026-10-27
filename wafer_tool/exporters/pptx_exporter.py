@@ -26,6 +26,8 @@ import sys
 
 try:
     from pptx import Presentation
+    from pptx.dml.color import RGBColor
+    from pptx.enum.shapes import PP_PLACEHOLDER
     from pptx.util import Pt
     HAS_PPTX = True
 except ImportError:
@@ -85,7 +87,7 @@ def create_powerpoint_report(
     for filename in png_files:
         img_path = os.path.join(page_png_dir, filename)
         slide = prs.slides.add_slide(content_layout)
-        _set_slide_title(slide, _slide_title_from_filename(filename))
+        _remove_placeholders(slide, _outline_title(filename))
         _add_report_page(slide, prs, img_path)
 
     import gc; gc.collect()   # free any lingering PNG buffers before writing
@@ -115,16 +117,37 @@ def _load_presentation() -> "Presentation":
         try:
             prs = Presentation(template)
             print(f"✓ Loaded PPTX template: {template}")
+            _ensure_widescreen(prs)
             return prs
         except Exception as exc:
             print(f"⚠  Template load failed ({exc}). Using default.")
     else:
         print("⚠  No PPTX template found — using python-pptx default.")
-    return Presentation()
+    prs = Presentation()
+    _ensure_widescreen(prs)
+    return prs
+
+
+def _ensure_widescreen(prs: "Presentation") -> None:
+    """Force a 16:9 widescreen slide (13.333 × 7.5 in).
+
+    python-pptx's default template is 4:3 (10 × 7.5 in); on a widescreen monitor
+    PowerPoint letterboxes it with grey bars, making every slide (and its plot)
+    look small. Widescreen fills modern displays. Only resizes when the deck is
+    not already ~16:9 so a genuinely 16:9 theme template is left untouched.
+    """
+    target_w, target_h = 12192000, 6858000   # 13.333 × 7.5 in in EMU
+    try:
+        if abs(prs.slide_width / prs.slide_height - 16 / 9) > 0.02:
+            prs.slide_width = target_w
+            prs.slide_height = target_h
+    except Exception:
+        pass
+
 
 
 def _content_slide_layout(prs: "Presentation"):
-    """Return a layout with a title placeholder when available."""
+    """Return the layout used for report-page slides (placeholders are stripped)."""
     try:
         return prs.slide_layouts[5]
     except IndexError:
@@ -132,50 +155,48 @@ def _content_slide_layout(prs: "Presentation"):
 
 
 def _add_report_page(slide, prs: "Presentation", img_path: str) -> None:
-    """Place a PDF-style page snapshot below the slide title with small margins."""
+    """Place a PDF-style page snapshot scaled to fill the slide (fit-to-box,
+    aspect preserved) and centred."""
     margin = Pt(10)
-    title_bottom = _title_bottom(slide)
-    top = max(title_bottom + Pt(6), margin)
-    picture = slide.shapes.add_picture(img_path, 0, 0, height=prs.slide_height - top - margin)
+    top = margin
+    avail_w = prs.slide_width - 2 * margin
+    avail_h = prs.slide_height - top - margin
+
+    # Add at native size, then scale by whichever dimension is the tighter fit
+    # so the image is as large as possible without overflowing or distorting.
+    picture = slide.shapes.add_picture(img_path, 0, 0)
+    if picture.width and picture.height:
+        scale = min(avail_w / picture.width, avail_h / picture.height)
+        picture.width = int(picture.width * scale)
+        picture.height = int(picture.height * scale)
     picture.left = int((prs.slide_width - picture.width) / 2)
-    picture.top = int(top)
+    picture.top = int(top + (avail_h - picture.height) / 2)
 
 
-def _set_slide_title(slide, text: str) -> None:
-    """Populate the slide title so PowerPoint outline view can display it."""
-    if slide.shapes.title is not None:
-        slide.shapes.title.text = text
-        return
-
-    textbox = slide.shapes.add_textbox(Pt(20), Pt(10), Pt(700), Pt(30))
-    textbox.text_frame.text = text
-
-
-def _title_bottom(slide) -> int:
-    if slide.shapes.title is None:
-        return 0
-    return slide.shapes.title.top + slide.shapes.title.height
-
-
-def _slide_title_from_filename(filename: str) -> str:
+def _outline_title(filename: str) -> str:
+    """Return a readable title for PowerPoint's Outline pane."""
     stem = os.path.splitext(filename)[0]
     stem = re.sub(r"^\d+_", "", stem)
-
-    if stem.startswith("summary_report"):
-        match = re.search(r"page_(\d+)$", stem)
-        if match and match.group(1) != "1":
-            return f"Summary Report ({match.group(1)})"
-        return "Summary Report"
-
-    if stem == "8_condition_distribution":
-        return "8-Condition Distribution"
-
-    match = re.match(r"lot_(.+?)_page_(\d+)$", stem)
-    if match:
-        lot_id, page_num = match.groups()
-        lot_title = f"Lot ID: {lot_id}"
-        if page_num != "1":
-            return f"{lot_title} ({page_num})"
-        return lot_title
-
+    lot_match = re.fullmatch(r"lot_(.+)_page_(\d+)", stem)
+    if lot_match:
+        return f"Lot ID: {lot_match.group(1)} | Page {lot_match.group(2)}"
+    stem = re.sub(r"_page_(\d+)$", r" - Page \1", stem)
     return stem.replace("_", " ").title()
+
+
+def _remove_placeholders(slide, title_text: str) -> None:
+    # Retain an off-slide title placeholder so PowerPoint shows page names in Outline.
+    for ph in list(slide.placeholders):
+        if ph.placeholder_format.type in {
+            PP_PLACEHOLDER.TITLE,
+            PP_PLACEHOLDER.CENTER_TITLE,
+        }:
+            ph.text = title_text
+            ph.left = -abs(ph.width)
+            ph.top = -abs(ph.height)
+            for paragraph in ph.text_frame.paragraphs:
+                for run in paragraph.runs:
+                    run.font.size = Pt(1)
+                    run.font.color.rgb = RGBColor(255, 255, 255)
+        else:
+            ph._element.getparent().remove(ph._element)

@@ -12,3 +12,11 @@ PyQt6>=6.5
 
 # PowerPoint (optional — PPTX output is skipped if not installed)
 python-pptx>=0.6.21
+
+# Excel import (.xlsx via openpyxl, legacy .xls via xlrd)
+openpyxl>=3.1
+xlrd>=2.0
+
+# Outlook email backend for job notifications (optional, Windows-only —
+# the SMTP backend is used instead when this is unavailable)
+pywin32>=306; sys_platform == "win32"

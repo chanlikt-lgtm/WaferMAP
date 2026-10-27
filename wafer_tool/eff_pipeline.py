@@ -73,6 +73,8 @@ def process_eff(
     on_wafer_ready: WaferReadyCallback | None = None,
     on_param_done: ParamDoneCallback | None = None,
     stop_cb: Callable[[], bool] | None = None,
+    filter_min: float | None = None,
+    filter_max: float | None = None,
 ) -> list[tuple[str, str, str, str]]:
     """Extract *indices* from *eff_path* and report each into its own folder.
 
@@ -105,6 +107,7 @@ def process_eff(
     extracted = extract_parameters(
         eff_path, indices, out_dir, scan=scan,
         progress_cb=_extract_progress, stop_cb=stop_cb,
+        filter_min=filter_min, filter_max=filter_max,
     )
     _check_cancel()
 
@@ -151,6 +154,8 @@ def process_eff(
                 # its images even on headless / scheduled runs (where no live
                 # preview is attached to trigger them).
                 render_individual_pngs=True,
+                empty_wafers=param.empty_wafers,
+                extra_sites=param.die_sites,
             )
         except RuntimeError as exc:
             if "Cancel" in str(exc):

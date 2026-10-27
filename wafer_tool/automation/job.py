@@ -19,7 +19,8 @@ JOB_VERSION = 1
 _EFF_EXTS = (".eff",)
 
 _PLOT_KEYS = ("t_low", "t_high", "use_log", "high_is_green",
-              "mirror_x", "mirror_y", "rot_deg")
+              "mirror_x", "mirror_y", "rot_deg",
+              "show_missing_grey", "extrapolate")
 
 
 @dataclass
@@ -39,16 +40,39 @@ class WaferJob:
     mirror_x: bool = False
     mirror_y: bool = False
     rot_deg: int = 0
+    # Wafer-map gap handling (see wafer_tool.config.PlotConfig).
+    show_missing_grey: bool = True
+    extrapolate: bool = False
     input_dir: str = ""              # when set, use newest match in this folder
     input_pattern: str = "*.txt"     # ';'-separated globs, e.g. "*.txt;*.csv"
     # Raw-EFF jobs: the measurement parameter names to map (each -> its own
     # output folder). Empty list means "every parameter in the file", the
     # automation-friendly default. Ignored for txt/csv jobs.
     eff_params: list[str] = field(default_factory=list)
+    # Raw-EFF jobs: optional global value filter. When both are set, measurement
+    # values outside [eff_filter_min, eff_filter_max] are dropped during import.
+    eff_filter_min: float | None = None
+    eff_filter_max: float | None = None
+    # Email these recipients a links-only summary (PDF / PPTX / PNG folder)
+    # when the job finishes. SMTP/Outlook settings come from the environment
+    # (see wafer_tool/automation/notify.py).
+    email_to: list[str] = field(default_factory=list)
+    # Master switch: only send the notification when this is True *and*
+    # ``email_to`` is non-empty. Lets a job keep its recipient list on file
+    # while the email is turned off.
+    email_enabled: bool = False
+    # Which links the notification includes (all on by default).
+    email_pdf: bool = True       # link to the report PDF
+    email_pptx: bool = True      # link to the PowerPoint
+    email_folder: bool = True    # link to the output folder (all files)
 
     def plot_config_kwargs(self) -> dict:
         """The subset of fields that construct a PlotConfig."""
         return {k: getattr(self, k) for k in _PLOT_KEYS}
+
+    def wants_email(self) -> bool:
+        """True when this job should send a completion email."""
+        return bool(self.email_enabled and self.email_to)
 
     def is_eff_input(self, resolved_path: str | None = None) -> bool:
         """True when this job's (resolved) input is a raw .eff extraction."""
@@ -71,6 +95,31 @@ class WaferJob:
             raise FileNotFoundError(
                 f"no file matching {self.input_pattern!r} in {self.input_dir}")
         return str(max(candidates, key=lambda f: f.stat().st_mtime))
+
+    def precheck(self) -> list[str]:
+        """Pre-run validation: return human-readable problems (empty list = OK).
+
+        Confirms the input resolves and exists, and that the output folder
+        exists (or its parent does, so it can be created). Callers can warn or
+        abort before starting a long report.
+        """
+        problems: list[str] = []
+        try:
+            resolved = self.resolve_input_file()
+        except FileNotFoundError as exc:
+            problems.append(str(exc))
+            resolved = ""
+        if resolved and not Path(resolved).is_file():
+            problems.append(f"input file not found: {resolved}")
+        if not self.out_dir:
+            problems.append("no output folder set")
+        else:
+            out = Path(self.out_dir)
+            if not out.exists() and not out.parent.exists():
+                problems.append(
+                    f"output folder is not reachable — its parent does not "
+                    f"exist: {out.parent}")
+        return problems
 
     def to_dict(self) -> dict:
         d = {"format": JOB_FORMAT, "version": JOB_VERSION,
@@ -97,7 +146,9 @@ def load_job(path: str | Path) -> WaferJob:
     if data.get("format") != JOB_FORMAT:
         raise ValueError(f"not a {JOB_FORMAT} file: {path}")
     fields = ("input_file", "out_dir", *_PLOT_KEYS, "input_dir", "input_pattern",
-              "eff_params")
+              "eff_params", "eff_filter_min", "eff_filter_max",
+              "email_to", "email_enabled",
+              "email_pdf", "email_pptx", "email_folder")
     missing = [f for f in ("out_dir", "t_low", "t_high") if f not in data]
     if missing:
         raise ValueError(f"job is missing required fields: {', '.join(missing)}")

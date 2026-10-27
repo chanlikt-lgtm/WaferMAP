@@ -35,6 +35,17 @@ from wafer_tool.ui.main_window import DataProcessorUI
 
 
 def main() -> None:
+    # ── Headless mode ────────────────────────────────────────────────────
+    # The packaged exe doubles as the scheduled-task / CLI runner. When invoked
+    # with a job (``WaferMapTool.exe --run-job job.wtjob`` or a bare
+    # ``... job.wtjob``) or ``--test-email addr``, run without a GUI so Windows
+    # Task Scheduler and command-line use work from the frozen exe too.
+    argv = sys.argv[1:]
+    if argv and ("--run-job" in argv or "--test-email" in argv
+                 or argv[0].lower().endswith((".wtjob", ".json"))):
+        from wafer_tool.automation.runner import main as runner_main
+        raise SystemExit(runner_main(argv))
+
     session_start()
     try:
         app = QApplication(sys.argv)

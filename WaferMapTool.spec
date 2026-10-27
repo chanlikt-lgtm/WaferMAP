@@ -15,6 +15,10 @@ mpl_data = collect_data_files("matplotlib")
 # Without this, PyInstaller misses them and numpy fails to import at runtime.
 numpy_datas, numpy_binaries, numpy_hidden = collect_all("numpy")
 
+# scipy: geometry.build_wafer_grid uses scipy.interpolate.griddata (linear +
+# nearest). collect_all bundles the Qhull / OpenBLAS DLLs it needs at runtime.
+scipy_datas, scipy_binaries, scipy_hidden = collect_all("scipy")
+
 hidden = [
     # PyQt6 — only what the app actually touches
     "PyQt6.QtCore",
@@ -45,14 +49,21 @@ hidden = [
 
     # pypdf (PDF bookmark injection)
     "pypdf",
+
+    # pywin32 — Outlook email backend (optional; guarded import at runtime)
+    "win32com",
+    "win32com.client",
+    "pythoncom",
+    "pywintypes",
+    "win32timezone",
 ]
 
 a = Analysis(
     ["main.py"],
     pathex=[],
-    binaries=numpy_binaries,
-    datas=mpl_data + numpy_datas,
-    hiddenimports=hidden + numpy_hidden,
+    binaries=numpy_binaries + scipy_binaries,
+    datas=mpl_data + numpy_datas + scipy_datas,
+    hiddenimports=hidden + numpy_hidden + scipy_hidden,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -60,13 +71,8 @@ a = Analysis(
         # GUI toolkits not used
         "tkinter", "wx", "_tkinter",
 
-        # scipy submodules not used by this app
-        # scipy fully removed — replaced by matplotlib.tri in geometry.py
-        "scipy",
-        "scipy.interpolate", "scipy.spatial", "scipy.stats",
-        "scipy.signal", "scipy.optimize", "scipy.fft",
-        "scipy.linalg", "scipy.io", "scipy.ndimage",
-        "scipy.odr", "scipy.sparse", "scipy.cluster",
+        # NOTE: scipy is REQUIRED — geometry.py uses scipy.interpolate.griddata.
+        # Do not exclude it (doing so crashes the exe when a wafer is rendered).
 
         # pandas extras not used
         "pandas.io.formats.style",
@@ -100,7 +106,9 @@ a = Analysis(
         # Dev / test tools
         "IPython", "jupyter", "notebook",
         "pytest", "sphinx", "setuptools",
-        "distutils", "unittest",
+        "distutils",
+        # NOTE: do NOT exclude 'unittest' — pyparsing (via matplotlib) imports
+        # it at import time (pyparsing.testing), so excluding it crashes the exe.
 
         # Image libs not needed
         "PIL.ImageQt",
