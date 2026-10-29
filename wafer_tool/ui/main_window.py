@@ -873,6 +873,11 @@ class DataProcessorUI(QMainWindow):
         g.addWidget(self.t_high_edit,              2, 1)
         return b
 
+    def _render_mode(self) -> str:
+        """Current render engine from the Discrete/Interpolate/Extrapolate radios."""
+        return {0: "discrete", 1: "interpolate", 2: "extrapolate"}.get(
+            self._fill_group.checkedId(), "discrete")
+
     def _grp_opts(self) -> QGroupBox:
         b = QGroupBox("Options & Wafer Orientation")
         outer = QVBoxLayout(b); outer.setSpacing(8)
@@ -888,23 +893,30 @@ class DataProcessorUI(QMainWindow):
         self.grey_chk = QCheckBox("Show missing data in grey")
         self.grey_chk.setChecked(True)
         self.grey_chk.setToolTip(
-            "Die areas with no nearby measurement are drawn grey (No data). "
-            "Unticked, they are left blank/white. No effect when Extrapolate is on.")
+            "Discrete: untested / skipped dies drawn grey. Interpolate: no-data areas "
+            "drawn grey. Unticked, they are left blank/white. N/A for Extrapolate.")
         outer.addWidget(self.grey_chk)
         fill_row = QHBoxLayout()
-        fill_row.addWidget(_L("Gap fill:", muted=True))
+        fill_row.addWidget(_L("Render:", muted=True))
         self._fill_group = QButtonGroup(self)
-        rb_interp = QRadioButton("Interpolate"); rb_interp.setChecked(True)
+        rb_discrete = QRadioButton("Discrete"); rb_discrete.setChecked(True)
+        rb_interp = QRadioButton("Interpolate")
         rb_extrap = QRadioButton("Extrapolate")
-        rb_interp.setToolTip("Fill only within a few chips of a measured die; "
-                             "farther areas are treated as no data.")
-        rb_extrap.setToolTip("Nearest-neighbour fill the whole wafer disc "
-                             "(no missing areas).")
-        self._fill_group.addButton(rb_interp, 0)
-        self._fill_group.addButton(rb_extrap, 1)
-        # Grey only affects interpolate mode; disable it under Extrapolate (audit CHK-0415).
-        self._fill_group.idClicked.connect(lambda i: self.grey_chk.setEnabled(i == 0))
-        fill_row.addWidget(rb_interp); fill_row.addWidget(rb_extrap); fill_row.addStretch(1)
+        rb_discrete.setToolTip("One coloured cell per die; untested / skipped dies stay "
+                               "grey. No interpolation — honest for checkerboard and "
+                               "partially-tested wafers.")
+        rb_interp.setToolTip("Smooth contour within a few chips of a measured die; "
+                             "farther areas are no data. Auto-reverts to Discrete on a "
+                             "checkerboard / low-coverage wafer.")
+        rb_extrap.setToolTip("Nearest-neighbour fill the whole wafer disc (no gaps). "
+                             "Auto-reverts to Discrete on a checkerboard.")
+        self._fill_group.addButton(rb_discrete, 0)
+        self._fill_group.addButton(rb_interp, 1)
+        self._fill_group.addButton(rb_extrap, 2)
+        # Grey marks skipped dies (discrete) / no-data (interpolate); N/A for extrapolate.
+        self._fill_group.idClicked.connect(lambda i: self.grey_chk.setEnabled(i != 2))
+        fill_row.addWidget(rb_discrete); fill_row.addWidget(rb_interp)
+        fill_row.addWidget(rb_extrap); fill_row.addStretch(1)
         outer.addLayout(fill_row)
 
         # Value filter for TXT / CSV / Excel imports (.eff uses its own dialog filter).
@@ -1537,7 +1549,8 @@ class DataProcessorUI(QMainWindow):
             email_pptx=self.email_pptx_chk.isChecked(),
             email_folder=self.email_folder_chk.isChecked(),
             show_missing_grey=self.grey_chk.isChecked(),
-            extrapolate=self._fill_group.checkedId() == 1,
+            render_mode=self._render_mode(),
+            extrapolate=(self._render_mode() == "extrapolate"),
         )
 
     def _edit_recipients(self) -> None:
@@ -1622,7 +1635,7 @@ class DataProcessorUI(QMainWindow):
                 mirror_y=self.miry_chk.isChecked(),
                 rot_deg=rot_deg,
                 show_missing_grey=self.grey_chk.isChecked(),
-                extrapolate=self._fill_group.checkedId() == 1,
+                render_mode=self._render_mode(),
             )
         except ValueError as exc:
             return self._status(f"⚠  {exc}", _RED)
@@ -1710,7 +1723,7 @@ class DataProcessorUI(QMainWindow):
                 mirror_y=self.miry_chk.isChecked(),
                 rot_deg=rot_deg,
                 show_missing_grey=self.grey_chk.isChecked(),
-                extrapolate=self._fill_group.checkedId() == 1,
+                render_mode=self._render_mode(),
             )
         except ValueError as exc:
             return self._status(f"⚠  {exc}", _RED)

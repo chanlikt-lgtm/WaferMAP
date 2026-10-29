@@ -1,0 +1,54 @@
+==============================================================================
+FULL 3-MODE TEST  started 2026-10-29 08:58:23
+modes: discrete / interpolate / extrapolate
+==============================================================================
+
+### B6CA_S8 1month.eff  params=144 rows=0 (10.0s)
+    rendered OK (all 3 modes): 144   empty: 0
+    errors: discrete=0 interpolate=0 extrapolate=0
+
+### C5SOI_from 22 Aug to 30 Sep-2026-09-30-025436-820.eff  params=108 rows=0 (11.0s)
+    rendered OK (all 3 modes): 108   empty: 0
+    errors: discrete=0 interpolate=0 extrapolate=0
+
+### IGBT3HV_8 1month.eff  params=135 rows=0 (14.1s)
+    rendered OK (all 3 modes): 135   empty: 0
+    errors: discrete=0 interpolate=0 extrapolate=0
+
+### IGBT4 1month.eff  params=41 rows=0 (5.7s)
+    rendered OK (all 3 modes): 41   empty: 0
+    errors: discrete=0 interpolate=0 extrapolate=0
+
+### KUL_C5_R10-retprob.eff  params=69 rows=0 (22.1s)
+    rendered OK (all 3 modes): 54   empty: 15
+    errors: discrete=0 interpolate=0 extrapolate=0
+
+### KUL_spt7-14day reporting-retprob.eff  params=454 rows=0 (39.2s)
+    rendered OK (all 3 modes): 454   empty: 0
+    errors: discrete=0 interpolate=0 extrapolate=0
+
+### SFET3_100 (3 months).eff  params=109 rows=0 (23.7s)
+    rendered OK (all 3 modes): 109   empty: 0
+    errors: discrete=0 interpolate=0 extrapolate=0
+
+### SFET3_100_8 1month.eff  params=35 rows=0 (8.2s)
+    rendered OK (all 3 modes): 35   empty: 0
+    errors: discrete=0 interpolate=0 extrapolate=0
+
+### SFET3_80 (3 months).eff  params=69 rows=0 (16.2s)
+    rendered OK (all 3 modes): 69   empty: 0
+    errors: discrete=0 interpolate=0 extrapolate=0
+
+### SPT5_60V_8 1month.eff  params=268 rows=0 (26.7s)
+    rendered OK (all 3 modes): 268   empty: 0
+    errors: discrete=0 interpolate=0 extrapolate=0
+
+### VT_FP.M1 Raw Data.eff  params=4 rows=0 (6.0s)
+    rendered OK (all 3 modes): 4   empty: 0
+    errors: discrete=0 interpolate=0 extrapolate=0
+
+==============================================================================
+GRAND TOTAL: 1436 params, rendered(all 3)=1421, empty=15
+ERRORS discrete=0 interpolate=0 extrapolate=0 total=0
+
+ALL PARAMS RENDER OK IN ALL 3 MODES

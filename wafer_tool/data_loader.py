@@ -7,10 +7,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .exceptions import DataLoadError
 from .logger import log
+
+# Values at/above this magnitude are eSquare "no valid reading" sentinels. We do
+# NOT drop them from TXT/CSV/Excel (the user filters huge values via Min/Max and
+# the colour follows their thresholds) — but we count them so the GUI can remind.
+_HUGE_MAGNITUDE = 1e10
 
 __all__ = ["read_wafer_data"]
 
@@ -106,6 +112,19 @@ def read_wafer_data(
             "Check that the file format and column indices are correct."
         )
 
+    # Drop NON-FINITE values (inf/-inf). NaN was already removed by dropna above.
+    # These are not numbers and cannot be placed on a colour scale (they render
+    # as white holes), so they are treated as untested/missing — the same way the
+    # .eff importer rejects them. Finite outliers, however large, are KEPT.
+    finite_mask = np.isfinite(df["value"].to_numpy())
+    if not finite_mask.all():
+        df = df[finite_mask]
+    n_after_finite = len(df)
+    if df.empty:
+        raise DataLoadError(
+            "No finite measurement values remain (all were NaN or infinite)."
+        )
+
     # Optional inclusive value filter (drops out-of-range measurements), mirroring
     # the .eff import filter so TXT / CSV / Excel can be filtered too.
     if filter_min is not None:
@@ -118,6 +137,11 @@ def read_wafer_data(
         )
     n_accepted = len(df)
 
+    # Reminder only (NOT a filter): huge sentinel-magnitude values are kept and
+    # coloured by the user's thresholds; the count lets the GUI suggest the
+    # value filter if these are unwanted sentinels.
+    n_huge = int((df["value"].abs() >= _HUGE_MAGNITUDE).sum())
+
     # Row-rejection accounting (audit F-07 / CHK-0205): nothing is discarded
     # silently — the caller can read df.attrs["load_counts"].
     counts = {
@@ -125,13 +149,16 @@ def read_wafer_data(
         "rows_accepted": int(n_accepted),
         "rejected_nonnumeric": int(n_total - n_after_num),
         "rejected_empty_id": int(n_after_num - n_after_id),
-        "rejected_by_filter": int(n_after_id - n_accepted),
+        "rejected_nonfinite": int(n_after_id - n_after_finite),
+        "rejected_by_filter": int(n_after_finite - n_accepted),
+        "reminder_huge": n_huge,
     }
     log.info("Loaded %d of %d rows (rejected: %d non-numeric, %d empty-id, "
-             "%d filtered), %d wafers",
+             "%d non-finite, %d filtered; %d huge kept), %d wafers",
              counts["rows_accepted"], counts["rows_total"],
              counts["rejected_nonnumeric"], counts["rejected_empty_id"],
-             counts["rejected_by_filter"], df.groupby(["lot", "wafer"]).ngroups)
+             counts["rejected_nonfinite"], counts["rejected_by_filter"],
+             counts["reminder_huge"], df.groupby(["lot", "wafer"]).ngroups)
     out = df.reset_index(drop=True)
     out.attrs["load_counts"] = counts
     return out

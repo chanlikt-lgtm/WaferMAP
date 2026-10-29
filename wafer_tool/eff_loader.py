@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import glob
 import json
+import math
 import os
 import re
 import shutil
@@ -343,7 +344,7 @@ def extract_parameters(
                             val = float(raw)
                         except ValueError:
                             continue
-                        if abs(val) >= _INVALID_MAGNITUDE:
+                        if not math.isfinite(val) or abs(val) >= _INVALID_MAGNITUDE:
                             continue
                         if filtering:
                             seen[idx].add(key)
@@ -512,7 +513,7 @@ def extract_single_param_df(
                 v = float(raw)
             except ValueError:
                 continue
-            if abs(v) >= _INVALID_MAGNITUDE:
+            if not math.isfinite(v) or abs(v) >= _INVALID_MAGNITUDE:
                 continue
             if filter_min is not None and v < filter_min:
                 continue

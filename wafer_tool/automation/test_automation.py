@@ -26,7 +26,7 @@ def test_job_round_trips(tmp_path):
     assert k.plot_config_kwargs() == {
         "t_low": -110, "t_high": -80, "use_log": True, "high_is_green": True,
         "mirror_x": True, "mirror_y": False, "rot_deg": 270,
-        "show_missing_grey": True, "extrapolate": False}
+        "show_missing_grey": True, "extrapolate": False, "render_mode": "discrete"}
 
 
 def test_job_forces_suffix_and_writes_metadata(tmp_path):

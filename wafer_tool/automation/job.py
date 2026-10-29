@@ -20,7 +20,7 @@ _EFF_EXTS = (".eff",)
 
 _PLOT_KEYS = ("t_low", "t_high", "use_log", "high_is_green",
               "mirror_x", "mirror_y", "rot_deg",
-              "show_missing_grey", "extrapolate")
+              "show_missing_grey", "extrapolate", "render_mode")
 
 
 @dataclass
@@ -43,6 +43,8 @@ class WaferJob:
     # Wafer-map gap handling (see wafer_tool.config.PlotConfig).
     show_missing_grey: bool = True
     extrapolate: bool = False
+    # Rendering engine: "discrete" (default) | "interpolate" | "extrapolate".
+    render_mode: str = "discrete"
     input_dir: str = ""              # when set, use newest match in this folder
     input_pattern: str = "*.txt"     # ';'-separated globs, e.g. "*.txt;*.csv"
     # Raw-EFF jobs: the measurement parameter names to map (each -> its own

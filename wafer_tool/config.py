@@ -90,12 +90,30 @@ class PlotConfig:
     #                       nearest-neighbour fill the whole wafer disc (no gaps).
     show_missing_grey: bool = True
     extrapolate:       bool = False
+    # Rendering engine:
+    #   "discrete"    (default) one coloured cell per die; untested/skipped dies
+    #                 stay grey. Nothing is interpolated — honest for checkerboard
+    #                 and partially-tested wafers.
+    #   "interpolate" smooth contour field within the measured region.
+    #   "extrapolate" smooth contour field nearest-filled across the whole disc.
+    # An interpolate/extrapolate request is auto-overridden to discrete when the
+    # wafer is a checkerboard / low-coverage (see plotting.draw_wafer_ax).
+    render_mode:       str  = "discrete"
 
     def __post_init__(self) -> None:
         # Guarantee t_low ≤ t_high regardless of user input order
         self.t_low, self.t_high = min(self.t_low, self.t_high), max(self.t_low, self.t_high)
         if self.rot_deg not in (0, 90, 180, 270):
             raise ValueError(f"rot_deg must be 0/90/180/270, got {self.rot_deg}")
+        # Back-compat: a caller/job that set extrapolate=True but left render_mode
+        # at its default still gets the extrapolate renderer.
+        if self.render_mode == "discrete" and self.extrapolate:
+            self.render_mode = "extrapolate"
+        if self.render_mode not in ("discrete", "interpolate", "extrapolate"):
+            raise ValueError("render_mode must be discrete/interpolate/extrapolate, "
+                             f"got {self.render_mode!r}")
+        # Keep the legacy flag a deterministic function of render_mode.
+        self.extrapolate = (self.render_mode == "extrapolate")
 
     @property
     def color_scheme(self) -> ColorScheme:
