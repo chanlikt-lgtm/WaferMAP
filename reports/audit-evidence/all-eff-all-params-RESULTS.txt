@@ -1,0 +1,53 @@
+==============================================================================
+FULL TEST — all .eff files, all parameters, both render modes
+started 2026-10-28 21:23:38
+modes: A=interpolate+grey  B=extrapolate   (MIN_POINTS_FOR_PLOT=4)
+==============================================================================
+
+### B6CA_S8 1month.eff
+    params=144  rows_scanned=950  (7.3s)
+    rendered OK (both modes) : 144
+    insufficient points      : 0
+    render ERRORS  interp=0  extrap=0
+
+### C5SOI_from 22 Aug to 30 Sep-2026-09-30-025436-820.eff
+    params=108  rows_scanned=60,516  (8.9s)
+    rendered OK (both modes) : 108
+    insufficient points      : 0
+    render ERRORS  interp=0  extrap=0
+
+### IGBT3HV_8 1month.eff
+    params=135  rows_scanned=30,035  (11.4s)
+    rendered OK (both modes) : 135
+    insufficient points      : 0
+    render ERRORS  interp=0  extrap=0
+
+### IGBT4 1month.eff
+    params=41  rows_scanned=24,395  (5.0s)
+    rendered OK (both modes) : 41
+    insufficient points      : 0
+    render ERRORS  interp=0  extrap=0
+
+### SFET3_100_8 1month.eff
+    params=35  rows_scanned=51,760  (7.7s)
+    rendered OK (both modes) : 35
+    insufficient points      : 0
+    render ERRORS  interp=0  extrap=0
+
+### SPT5_60V_8 1month.eff
+    params=268  rows_scanned=16,395  (24.5s)
+    rendered OK (both modes) : 268
+    insufficient points      : 0
+    render ERRORS  interp=0  extrap=0
+
+==============================================================================
+GRAND TOTAL
+    files tested        : 6
+    parameters total    : 731
+    rendered OK (both)  : 731
+    insufficient points : 0
+    render ERRORS       : interp=0  extrap=0  total=0
+
+==============================================================================
+ALL PARAMETERS RENDER OK IN BOTH MODES
+==============================================================================

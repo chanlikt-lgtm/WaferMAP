@@ -129,12 +129,22 @@ def draw_wafer_ax(
     s_min = min(valid.min() - 0.1 if valid.size else p_low  - 1, p_low  - 0.1)
     s_max = max(valid.max() + 0.1 if valid.size else p_high + 1, p_high + 0.1)
 
+    # contourf requires STRICTLY increasing levels. A fixed +/-0.1 margin is
+    # lost to float rounding when a threshold is huge — e.g. an eSquare "no
+    # upper limit" spec of 1e31 makes s_max == p_high — which previously raised
+    # "Contour levels must be increasing". Nudge any non-increasing level up by
+    # one ULP so every threshold/value magnitude renders instead of crashing.
+    levels = [s_min, p_low, p_high, s_max]
+    for _k in range(1, len(levels)):
+        if not levels[_k] > levels[_k - 1]:
+            levels[_k] = float(np.nextafter(levels[_k - 1], np.inf))
+
     # ── Rendering ─────────────────────────────────────────────────────────
     cs = config.color_scheme
     if valid.size > 0:
         ax.contourf(
             xi, yi, zi,
-            levels=[s_min, p_low, p_high, s_max],
+            levels=levels,
             colors=[cs.low, cs.mid, cs.high],
         )
     # Grey "No data" overlay: only in interpolate mode AND when the user ticks it.
